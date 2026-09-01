@@ -154,3 +154,29 @@ test("reports count-only decryption diagnostics", async () => {
   assert.equal(typeof decryptor.diagnostics.recorded_at, "string")
   assert.equal(JSON.stringify(decryptor.diagnostics).includes("secret"), false)
 })
+
+test("redacts credentials and URLs from failure diagnostics", async () => {
+  const decryptor = new XChatDecryptor({
+    pin: "safe-pin",
+    createChat: async () => ({
+      unlock: async () => {
+        throw new Error("request https://realm.example/token?secret=abc failed for abcdefghijklmnopqrstuvwxyz1234567890")
+      },
+    }),
+  })
+
+  await assert.rejects(() => decryptor.decrypt({
+    identity: { user_id: "10", public_key_version: "20", juicebox_config: {} },
+    signing_keys: [{
+      user_id: "10",
+      public_key_version: "20",
+      public_key: "identity-key",
+      signing_public_key: "signing-key",
+      identity_public_key_signature: "signature",
+    }],
+    events: ["event"],
+  }))
+
+  assert.equal(decryptor.diagnostics.event, "session_unlock_failed")
+  assert.equal(decryptor.diagnostics.error_message, "request [url] failed for [redacted]")
+})

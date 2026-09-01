@@ -45,6 +45,16 @@ function valueFingerprint(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex")
 }
 
+function diagnosticError(error) {
+  return {
+    error_name: typeof error?.name === "string" ? error.name : "Error",
+    error_message: String(error?.message ?? error)
+      .replace(/https?:\/\/\S+/gi, "[url]")
+      .replace(/[A-Za-z0-9_=-]{32,}/g, "[redacted]")
+      .slice(0, 300),
+  }
+}
+
 export class XChatDecryptor {
   #createChat
   #diagnostic
@@ -134,6 +144,7 @@ export class XChatDecryptor {
         key_event_count: includedKeyEvents.length,
         event_count: events.length,
         duration_ms: Date.now() - startedAt,
+        ...diagnosticError(error),
       })
       throw error
     }
@@ -181,7 +192,10 @@ export class XChatDecryptor {
       this.#report("session_unlock_completed", { duration_ms: Date.now() - unlockStartedAt })
       return chat
     }).catch((error) => {
-      this.#report("session_unlock_failed", { duration_ms: Date.now() - unlockStartedAt })
+      this.#report("session_unlock_failed", {
+        duration_ms: Date.now() - unlockStartedAt,
+        ...diagnosticError(error),
+      })
       this.#session = undefined
       this.#fingerprint = undefined
       this.#signingKeysFingerprint = undefined
