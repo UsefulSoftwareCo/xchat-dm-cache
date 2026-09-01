@@ -8,6 +8,8 @@ import { XChatApi } from "./xchat-api.js"
 import { XChatSync } from "./xchat-sync.js"
 import { XChatPendingProcessor } from "./xchat-pending.js"
 import { startXChatWorkers, xchatStartupRetryDelay } from "./xchat-startup.js"
+import { LegacyDmCache } from "./legacy-dm-cache.js"
+import { LegacyDmSync } from "./legacy-dm-sync.js"
 import { createChat } from "@xdevplatform/chat-xdk"
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10)
@@ -37,12 +39,17 @@ xchatCache = await XChatCache.open({
   encryptionSecret: process.env.XCHAT_CACHE_ENCRYPTION_KEY,
   previousEncryptionSecret: process.env.STATE_API_KEY,
 })
+const legacyDmCache = await LegacyDmCache.open({
+  filePath: process.env.LEGACY_DM_CACHE_FILE ?? resolve(dirname(stateFile), "legacy-dm-cache.sqlite"),
+  encryptionSecret: process.env.XCHAT_CACHE_ENCRYPTION_KEY,
+})
 xchatApi.setTokenStore({
   get: () => xchatCache.getEncryptedConfig("x_oauth_tokens"),
   set: (tokens) => xchatCache.setEncryptedConfig("x_oauth_tokens", tokens),
 })
 const xchatPending = new XChatPendingProcessor({ cache: xchatCache })
 const xchatSync = new XChatSync({ api: xchatApi, cache: xchatCache, pendingProcessor: xchatPending })
+const legacyDmSync = new LegacyDmSync({ api: xchatApi, cache: legacyDmCache })
 
 const server = createServer(createHandler({
   store,
@@ -52,6 +59,8 @@ const server = createServer(createHandler({
   xchatCache,
   xchatSync,
   xchatPending,
+  legacyDmCache,
+  legacyDmSync,
   webhookSecret: process.env.X_WEBHOOK_CONSUMER_SECRET,
 }))
 
@@ -77,4 +86,14 @@ function startWorkers() {
 server.listen(port, "0.0.0.0", () => {
   console.log(`Executor state handler listening on port ${port}`)
   startWorkers()
+  legacyDmSync.resumeIncompleteJobs()
+  void legacyDmSync.syncRecent({ maxPages: 5 }).catch((error) => {
+    console.error("Legacy DM startup sync failed", error)
+  })
+  const pollInterval = Math.max(300_000, Number(process.env.LEGACY_DM_POLL_INTERVAL_MS) || 3_600_000)
+  setInterval(() => {
+    void legacyDmSync.syncRecent({ maxPages: 1 }).catch((error) => {
+      console.error("Legacy DM polling failed", error)
+    })
+  }, pollInterval).unref()
 })

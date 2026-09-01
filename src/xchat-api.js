@@ -18,6 +18,37 @@ function mapSigningKey(userId, key) {
   }
 }
 
+const legacyDmOptions = ({ paginationToken, maxResults = 100 } = {}) => ({
+  maxResults,
+  paginationToken,
+  eventTypes: ["MessageCreate", "ParticipantsJoin", "ParticipantsLeave"],
+  dmEventFields: ["attachments", "created_at", "dm_conversation_id", "entities", "event_type", "id", "text"],
+  expansions: ["participant_ids", "sender_id"],
+  userFields: ["id", "name", "username"],
+})
+
+function legacyDmPage(response) {
+  return {
+    events: (response.data ?? []).map((event) => ({
+      id: event.id,
+      event_type: event.eventType,
+      dm_conversation_id: event.dmConversationId,
+      sender_id: event.senderId,
+      participant_ids: event.participantIds ?? [],
+      created_at: event.createdAt,
+      text: event.text,
+      attachments: event.attachments,
+      entities: event.entities,
+    })),
+    users: (response.includes?.users ?? []).map((user) => ({
+      id: user.id,
+      name: user.name,
+      username: user.username,
+    })),
+    next_token: response.meta?.nextToken ?? null,
+  }
+}
+
 function apiError(response, operation) {
   const errors = Array.isArray(response?.errors) ? response.errors : []
   if (errors.length === 0) return
@@ -239,5 +270,39 @@ export class XChatApi {
       },
       signing_keys: keys.map((value) => mapSigningKey(userId, value)),
     }
+  }
+
+  async getMe() {
+    if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
+    const response = await this.#call(async (client) => {
+      const value = await client.users.getMe({ userFields: ["id", "name", "username"] })
+      apiError(value, "Get current X user")
+      return value
+    })
+    return {
+      id: response.data?.id,
+      name: response.data?.name,
+      username: response.data?.username,
+    }
+  }
+
+  async listLegacyDmEvents(options = {}) {
+    if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
+    const response = await this.#call(async (client) => {
+      const value = await client.directMessages.getEvents(legacyDmOptions(options))
+      apiError(value, "List legacy DM events")
+      return value
+    })
+    return legacyDmPage(response)
+  }
+
+  async listLegacyDmEventsByParticipant(participantId, options = {}) {
+    if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
+    const response = await this.#call(async (client) => {
+      const value = await client.directMessages.getEventsByParticipantId(participantId, legacyDmOptions(options))
+      apiError(value, `List legacy DM events for ${participantId}`)
+      return value
+    })
+    return legacyDmPage(response)
   }
 }

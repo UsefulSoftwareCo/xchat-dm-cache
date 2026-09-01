@@ -16,6 +16,18 @@ test("maps official XDK chat responses into cache input", async () => {
     },
     users: {
       getPublicKey: async () => ({ data: [{ publicKeyVersion: "1", publicKey: "identity", signingPublicKey: "signing", identityPublicKeySignature: "signature" }] }),
+      getMe: async () => ({ data: { id: "self", name: "Rhys", username: "RhysSullivan" } }),
+    },
+    directMessages: {
+      getEvents: async () => ({
+        data: [{ id: "dm-1", eventType: "MessageCreate", dmConversationId: "self-sender", senderId: "sender", participantIds: ["self", "sender"], createdAt: "2024-02-01T00:00:00.000Z", text: "hello" }],
+        includes: { users: [{ id: "sender", name: "Sender", username: "sender" }] },
+        meta: { nextToken: "legacy-next" },
+      }),
+      getEventsByParticipantId: async (participantId) => ({
+        data: [{ id: "dm-2", eventType: "MessageCreate", dmConversationId: `self-${participantId}`, senderId: participantId, participantIds: ["self", participantId], createdAt: "2023-02-01T00:00:00.000Z", text: "older" }],
+        meta: {},
+      }),
     },
   }
   const api = new XChatApi({ client })
@@ -45,6 +57,23 @@ test("maps official XDK chat responses into cache input", async () => {
     signing_public_key: "signing",
     identity_public_key_signature: "signature",
   }])
+  assert.deepEqual(await api.getMe(), { id: "self", name: "Rhys", username: "RhysSullivan" })
+  assert.deepEqual(await api.listLegacyDmEvents(), {
+    events: [{
+      id: "dm-1",
+      event_type: "MessageCreate",
+      dm_conversation_id: "self-sender",
+      sender_id: "sender",
+      participant_ids: ["self", "sender"],
+      created_at: "2024-02-01T00:00:00.000Z",
+      text: "hello",
+      attachments: undefined,
+      entities: undefined,
+    }],
+    users: [{ id: "sender", name: "Sender", username: "sender" }],
+    next_token: "legacy-next",
+  })
+  assert.equal((await api.listLegacyDmEventsByParticipant("sender")).events[0].id, "dm-2")
 })
 
 test("refreshes an expired OAuth token and persists the rotated token", async () => {

@@ -19,6 +19,8 @@ let processCount = 0
 const backfillJob = { id: "00000000-0000-4000-8000-000000000001", status: "pending" }
 const raisedBackfillJob = { ...backfillJob, max_events: 50000, max_pages: 5000 }
 const scheduledJobs = []
+const scheduledLegacyJobs = []
+const legacyJob = { id: "00000000-0000-4000-8000-000000000002", status: "pending" }
 
 before(async () => {
   server = createServer(createHandler({
@@ -32,6 +34,7 @@ before(async () => {
     webhookSecret: "webhook-secret",
     xchatCache: {
       status: () => ({ messages: 0 }),
+      listMessages: () => ({ data: [], meta: {} }),
       acceptWebhook: (body, rawBody) => {
         acceptedWebhooks.push({ body, rawBody })
         return { accepted: true, inserted: 1, duplicates: 0 }
@@ -45,6 +48,19 @@ before(async () => {
       createJob: () => backfillJob,
       schedule: (id) => scheduledJobs.push(id),
       runJob: async () => ({ ...backfillJob, status: "completed" }),
+    },
+    legacyDmCache: {
+      status: () => ({ messages: 1 }),
+      acceptWebhook: () => ({ accepted: true, inserted: 0, duplicates: 0 }),
+      listMessages: () => ({ data: [{ event_id: "legacy-1", created_at: "2026-01-01T00:00:00.000Z", source: "legacy_dm" }], meta: {} }),
+      listBackfillJobs: () => ({ data: [legacyJob] }),
+      getBackfillJob: (id) => id === legacyJob.id ? legacyJob : null,
+    },
+    legacyDmSync: {
+      syncRecent: async () => ({ complete: true }),
+      createJob: () => legacyJob,
+      schedule: (id) => scheduledLegacyJobs.push(id),
+      runJob: async () => ({ ...legacyJob, status: "completed" }),
     },
   }))
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
@@ -66,6 +82,7 @@ test("does not expose private XChat counts through public health", async () => {
     xchat_configured: true,
     xchat_cache_ready: true,
     xchat_webhook_configured: true,
+    legacy_dm_cache_ready: true,
   })
 })
 
@@ -103,6 +120,8 @@ test("publishes a valid OpenAPI document", async () => {
   assert.equal(document.paths["/xchat/cache/events"].get.operationId, "listCachedXChatEvents")
   assert.equal(document.paths["/xchat/cache/backfill-jobs"].post.operationId, "createXChatBackfillJob")
   assert.equal(document.paths["/xchat/cache/backfill-jobs/{job_id}"].patch.operationId, "raiseXChatBackfillJobLimits")
+  assert.equal(document.paths["/x/cache/messages"].get.operationId, "listCachedXMessages")
+  assert.equal(document.paths["/x/cache/legacy/messages"].get.operationId, "listCachedLegacyDmMessages")
 })
 
 test("answers X webhook CRC challenges", async () => {
@@ -130,7 +149,12 @@ test("persists a signed X webhook before processing it", async () => {
     body,
   })
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { accepted: true, inserted: 1, duplicates: 0 })
+  assert.deepEqual(await response.json(), {
+    accepted: true,
+    inserted: 1,
+    duplicates: 0,
+    legacy_dm: { accepted: true, inserted: 0, duplicates: 0 },
+  })
   await new Promise((resolve) => setImmediate(resolve))
   assert.deepEqual(acceptedWebhooks[0].body, JSON.parse(body))
   assert.deepEqual(acceptedWebhooks[0].rawBody, Buffer.from(body))
@@ -170,4 +194,20 @@ test("creates and inspects bounded XChat backfill jobs", async () => {
   assert.equal(raised.status, 200)
   assert.deepEqual(await raised.json(), raisedBackfillJob)
   assert.deepEqual(scheduledJobs, [backfillJob.id, backfillJob.id])
+})
+
+test("reads unified messages and creates legacy DM backfill jobs", async () => {
+  const headers = { authorization: "Bearer test-secret", "content-type": "application/json" }
+  const messages = await fetch(`${baseUrl}/x/cache/messages`, { headers })
+  assert.equal(messages.status, 200)
+  assert.equal((await messages.json()).data[0].source, "legacy_dm")
+
+  const created = await fetch(`${baseUrl}/x/cache/legacy/backfill-jobs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ participant_ids: ["sender"], max_events: 100, max_pages: 10 }),
+  })
+  assert.equal(created.status, 202)
+  assert.deepEqual(await created.json(), legacyJob)
+  assert.deepEqual(scheduledLegacyJobs, [legacyJob.id])
 })

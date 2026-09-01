@@ -44,7 +44,37 @@ function cacheUnavailable(response) {
   return json(response, 503, { error: "XChat cache is not available" })
 }
 
-export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache, xchatSync, xchatPending, webhookSecret }) {
+function unifiedMessages(xchatCache, legacyDmCache, options) {
+  const limit = Math.max(1, Math.min(Number(options.limit) || 50, 100))
+  const xchat = xchatCache.listMessages({ ...options, limit })
+  const legacy = legacyDmCache.listMessages({ ...options, limit })
+  const data = [
+    ...xchat.data.map((value) => ({ ...value, source: "xchat" })),
+    ...legacy.data,
+  ].sort((left, right) => right.created_at.localeCompare(left.created_at) || right.event_id.localeCompare(left.event_id))
+    .slice(0, limit)
+  return {
+    data,
+    meta: {
+      result_count: data.length,
+      next_before: data.length === limit ? data.at(-1).created_at : null,
+      sources: { xchat: xchat.data.length, legacy_dm: legacy.data.length },
+    },
+  }
+}
+
+export function createHandler({
+  store,
+  apiKey,
+  publicBaseUrl,
+  xchat,
+  xchatCache,
+  xchatSync,
+  xchatPending,
+  legacyDmCache,
+  legacyDmSync,
+  webhookSecret,
+}) {
   if (!apiKey) throw new Error("STATE_API_KEY is required")
 
   return async function handler(request, response) {
@@ -57,6 +87,7 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
           xchat_configured: xchat?.configured ?? false,
           xchat_cache_ready: Boolean(xchatCache),
           xchat_webhook_configured: Boolean(webhookSecret),
+          legacy_dm_cache_ready: Boolean(legacyDmCache),
         })
       }
 
@@ -78,12 +109,14 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
         if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
           return json(response, 401, { error: "Invalid webhook signature" })
         }
-        const result = xchatCache.acceptWebhook(JSON.parse(rawBody.toString("utf8")), rawBody)
+        const body = JSON.parse(rawBody.toString("utf8"))
+        const result = xchatCache.acceptWebhook(body, rawBody)
+        const legacyDm = legacyDmCache?.acceptWebhook(body)
         if (xchatPending) xchatPending.request()
         else queueMicrotask(() => {
           xchatCache.processPending().catch((error) => console.error("XChat webhook processing failed", error))
         })
-        return json(response, 200, result)
+        return json(response, 200, { ...result, legacy_dm: legacyDm })
       }
 
       if (!isAuthorized(request, apiKey)) {
@@ -175,6 +208,65 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
           backfill: xchatSync?.diagnostics ?? null,
           pending_processing: xchatPending?.diagnostics ?? null,
         })
+      }
+
+      if (url.pathname === "/x/cache/messages" && request.method === "GET") {
+        if (!xchatCache || !legacyDmCache) return cacheUnavailable(response)
+        return json(response, 200, unifiedMessages(xchatCache, legacyDmCache, {
+          limit: url.searchParams.get("limit"),
+          before: url.searchParams.get("before") || undefined,
+          after: url.searchParams.get("after") || undefined,
+          conversation_id: url.searchParams.get("conversation_id") || undefined,
+          participant_id: url.searchParams.get("participant_id") || undefined,
+          direction: url.searchParams.get("direction") || undefined,
+        }))
+      }
+
+      if (url.pathname === "/x/cache/status" && request.method === "GET") {
+        if (!xchatCache || !legacyDmCache) return cacheUnavailable(response)
+        return json(response, 200, { xchat: xchatCache.status(), legacy_dm: legacyDmCache.status() })
+      }
+
+      if (url.pathname === "/x/cache/legacy/messages" && request.method === "GET") {
+        if (!legacyDmCache) return cacheUnavailable(response)
+        return json(response, 200, legacyDmCache.listMessages({
+          limit: url.searchParams.get("limit"),
+          before: url.searchParams.get("before") || undefined,
+          after: url.searchParams.get("after") || undefined,
+          conversation_id: url.searchParams.get("conversation_id") || undefined,
+          participant_id: url.searchParams.get("participant_id") || undefined,
+          direction: url.searchParams.get("direction") || undefined,
+        }))
+      }
+
+      if (url.pathname === "/x/cache/legacy/sync" && request.method === "POST") {
+        if (!legacyDmSync) return cacheUnavailable(response)
+        const body = await readJson(request).catch(() => ({}))
+        return json(response, 200, await legacyDmSync.syncRecent({ maxPages: body.max_pages }))
+      }
+
+      if (url.pathname === "/x/cache/legacy/backfill-jobs" && request.method === "POST") {
+        if (!legacyDmSync) return cacheUnavailable(response)
+        const job = legacyDmSync.createJob(await readJson(request))
+        legacyDmSync.schedule(job.id)
+        return json(response, 202, job)
+      }
+
+      if (url.pathname === "/x/cache/legacy/backfill-jobs" && request.method === "GET") {
+        if (!legacyDmCache) return cacheUnavailable(response)
+        return json(response, 200, legacyDmCache.listBackfillJobs({ limit: url.searchParams.get("limit") }))
+      }
+
+      const legacyBackfillMatch = url.pathname.match(/^\/x\/cache\/legacy\/backfill-jobs\/([^/]+)$/)
+      if (legacyBackfillMatch && request.method === "GET") {
+        if (!legacyDmCache) return cacheUnavailable(response)
+        const job = legacyDmCache.getBackfillJob(decodeURIComponent(legacyBackfillMatch[1]))
+        return job ? json(response, 200, job) : json(response, 404, { error: "Legacy DM backfill job was not found" })
+      }
+
+      if (legacyBackfillMatch && request.method === "POST") {
+        if (!legacyDmSync) return cacheUnavailable(response)
+        return json(response, 200, await legacyDmSync.runJob(decodeURIComponent(legacyBackfillMatch[1])))
       }
 
       if (url.pathname === "/xchat/cache/backfill-jobs" && request.method === "POST") {
@@ -310,6 +402,90 @@ export function openApiDocument(publicBaseUrl) {
     },
     security: [{ bearerAuth: [] }],
     paths: {
+      "/x/cache/messages": {
+        get: {
+          operationId: "listCachedXMessages",
+          summary: "List messages from the encrypted XChat and legacy DM caches",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
+            { name: "before", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "after", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "conversation_id", in: "query", schema: { type: "string" } },
+            { name: "participant_id", in: "query", schema: { type: "string" } },
+            { name: "direction", in: "query", schema: { type: "string", enum: ["sent", "received"] } },
+          ],
+          responses: { "200": { description: "Unified cached X messages", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/x/cache/status": {
+        get: {
+          operationId: "getXMessageCacheStatus",
+          summary: "Get encrypted XChat and legacy DM cache status",
+          responses: { "200": { description: "Unified X message cache status", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/x/cache/legacy/messages": {
+        get: {
+          operationId: "listCachedLegacyDmMessages",
+          summary: "List messages from the encrypted legacy DM cache",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
+            { name: "before", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "after", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "conversation_id", in: "query", schema: { type: "string" } },
+            { name: "participant_id", in: "query", schema: { type: "string" } },
+            { name: "direction", in: "query", schema: { type: "string", enum: ["sent", "received"] } },
+          ],
+          responses: { "200": { description: "Cached legacy DM messages", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/x/cache/legacy/sync": {
+        post: {
+          operationId: "syncRecentLegacyDms",
+          summary: "Sync recent legacy DM events from the official X API",
+          requestBody: { content: { "application/json": { schema: {
+            type: "object",
+            properties: { max_pages: { type: "integer", minimum: 1, maximum: 100, default: 5 } },
+          } } } },
+          responses: { "200": { description: "Legacy DM sync result" }, "401": errorResponses["401"], "503": { description: "X OAuth is not configured" } },
+        },
+      },
+      "/x/cache/legacy/backfill-jobs": {
+        post: {
+          operationId: "createLegacyDmBackfillJob",
+          summary: "Create a resumable official legacy DM participant backfill",
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["participant_ids", "max_events", "max_pages"],
+            properties: {
+              participant_ids: { type: "array", minItems: 1, items: { type: "string" } },
+              max_events: { type: "integer", minimum: 1 },
+              max_pages: { type: "integer", minimum: 1 },
+            },
+          } } } },
+          responses: { "202": { description: "Legacy DM backfill job created" }, "400": { description: "Invalid limits or participant IDs" }, "401": errorResponses["401"] },
+        },
+        get: {
+          operationId: "listLegacyDmBackfillJobs",
+          summary: "List durable legacy DM backfill jobs",
+          parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } }],
+          responses: { "200": { description: "Legacy DM backfill jobs" }, "401": errorResponses["401"] },
+        },
+      },
+      "/x/cache/legacy/backfill-jobs/{job_id}": {
+        get: {
+          operationId: "getLegacyDmBackfillJob",
+          summary: "Get a durable legacy DM backfill job",
+          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Legacy DM backfill job" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
+        },
+        post: {
+          operationId: "runLegacyDmBackfillJob",
+          summary: "Resume a durable legacy DM backfill job",
+          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Current legacy DM backfill job state" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
+        },
+      },
       "/xchat/decrypt-events": {
         post: {
           operationId: "decryptXChatEvents",

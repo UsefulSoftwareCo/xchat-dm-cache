@@ -59,3 +59,24 @@ when the XDK provides it.
 The events route keeps all XDK event types. This includes messages, edits,
 reactions, deletes, receipts, group changes, and settings changes. The messages
 route returns only message events.
+
+The service also keeps a separate encrypted cache for legacy plaintext DMs.
+It reads only through X's official DM endpoints. A signed activity webhook is
+the live path, and a bounded hourly poll reconciles missed deliveries. Event
+IDs make both paths idempotent. Historical jobs fetch each supplied participant
+thread with durable page checkpoints.
+
+Legacy DM routes:
+
+- `GET /x/cache/messages` merges XChat and legacy messages.
+- `GET /x/cache/status` reports both cache states.
+- `GET /x/cache/legacy/messages`
+- `POST /x/cache/legacy/sync`
+- `POST /x/cache/legacy/backfill-jobs`
+- `GET /x/cache/legacy/backfill-jobs`
+- `GET /x/cache/legacy/backfill-jobs/{job_id}`
+- `POST /x/cache/legacy/backfill-jobs/{job_id}`
+
+Set `LEGACY_DM_CACHE_FILE` to override the default `legacy-dm-cache.sqlite`
+beside `STATE_FILE`. Set `LEGACY_DM_POLL_INTERVAL_MS` to change the one-hour
+reconciliation interval. The service enforces a minimum five-minute interval.
