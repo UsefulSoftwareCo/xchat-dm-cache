@@ -1185,6 +1185,9 @@ export class XChatCache {
 
   status() {
     const count = (table, where = "") => this.#db.prepare(`SELECT COUNT(*) AS count FROM ${table} ${where}`).get().count
+    const lastWebhookReceivedAt = this.#db.prepare(`
+      SELECT MAX(received_at) AS received_at FROM xchat_webhook_deliveries
+    `).get().received_at
     const distinctSenders = this.#db.prepare(`
       SELECT COUNT(DISTINCT sender_id) AS count FROM xchat_events WHERE sender_id IS NOT NULL
     `).get().count
@@ -1231,6 +1234,7 @@ export class XChatCache {
       decrypted_events: count("xchat_decrypted_events"),
       messages: count("xchat_decrypted_events", "WHERE event_type = 'message'"),
       webhook_deliveries: count("xchat_webhook_deliveries"),
+      last_webhook_received_at: lastWebhookReceivedAt ?? null,
     }
   }
 

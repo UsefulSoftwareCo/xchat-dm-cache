@@ -170,6 +170,7 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
         if (!xchatCache) return cacheUnavailable(response)
         return json(response, 200, {
           ...xchatCache.status(),
+          webhook_configured: Boolean(webhookSecret),
           decryption: xchat?.diagnostics ?? null,
           backfill: xchatSync?.diagnostics ?? null,
           pending_processing: xchatPending?.diagnostics ?? null,

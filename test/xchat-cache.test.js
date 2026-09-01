@@ -109,6 +109,7 @@ test("deduplicates backfill events and encrypts private values at rest", async (
     decrypted_events: 1,
     messages: 1,
     webhook_deliveries: 0,
+    last_webhook_received_at: null,
   })
   const messages = cache.listMessages()
   assert.equal(messages.data[0].direction, "received")
@@ -349,6 +350,7 @@ test("deduplicates live webhook deliveries and message events", async () => {
   assert.deepEqual(cache.acceptWebhook(body, rawBody), { accepted: true, inserted: 0, duplicates: 1 })
   assert.deepEqual(await cache.processPending(), { selected: 1, processed: 1, failed: 0 })
   assert.equal(cache.status().webhook_deliveries, 1)
+  assert.match(cache.status().last_webhook_received_at, /^\d{4}-\d{2}-\d{2}T/)
   assert.equal(cache.status().messages, 1)
   cache.close()
 })

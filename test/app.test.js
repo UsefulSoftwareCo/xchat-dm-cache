@@ -69,6 +69,14 @@ test("does not expose private XChat counts through public health", async () => {
   })
 })
 
+test("reports private webhook configuration through authenticated cache status", async () => {
+  const response = await fetch(`${baseUrl}/xchat/cache/status`, {
+    headers: { authorization: "Bearer test-secret" },
+  })
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).webhook_configured, true)
+})
+
 test("writes, reads, lists, and deletes JSON state", async () => {
   const headers = { authorization: "Bearer test-secret", "content-type": "application/json" }
   const put = await fetch(`${baseUrl}/state/test/key`, { method: "PUT", headers, body: JSON.stringify({ value: { enabled: true } }) })
