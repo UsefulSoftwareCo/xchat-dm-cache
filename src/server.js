@@ -40,7 +40,6 @@ xchatApi.setTokenStore({
   get: () => xchatCache.getEncryptedConfig("x_oauth_tokens"),
   set: (tokens) => xchatCache.setEncryptedConfig("x_oauth_tokens", tokens),
 })
-xchatCache.setSigningKeyProvider(xchatApi.configured ? (userId) => xchatApi.getSigningKeys(userId) : undefined)
 const xchatPending = new XChatPendingProcessor({ cache: xchatCache })
 const xchatSync = new XChatSync({ api: xchatApi, cache: xchatCache, pendingProcessor: xchatPending })
 
