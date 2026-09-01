@@ -691,8 +691,18 @@ export class XChatCache {
   async #drainPending(limit) {
     const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
     let processed = 0
-    let failed = 0
-    let selected = 0
+    const missingKeyEvents = this.#db.prepare(`
+      UPDATE xchat_events
+      SET status = 'failed', attempts = 10, last_error = 'No cached signing key exists for this sender'
+      WHERE status IN ('pending', 'failed')
+        AND attempts < 10
+        AND sender_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM xchat_signing_keys k WHERE k.user_id = xchat_events.sender_id
+        )
+    `).run().changes
+    let failed = missingKeyEvents
+    let selected = missingKeyEvents
     do {
       this.#processRequested = false
       const rows = this.#db.prepare(`

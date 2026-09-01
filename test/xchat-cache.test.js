@@ -574,8 +574,9 @@ test("retries only failed events from senders whose signing keys changed", async
     conversation: { id: "conversation-2" },
     events: [{ event_uuid: "unrelated-event", sender_id: "unrelated-user", encoded_event: "unrelated-ciphertext" }],
   })
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    assert.deepEqual(await cache.processPending(), { selected: 2, processed: 0, failed: 2 })
+  assert.deepEqual(await cache.processPending(), { selected: 2, processed: 0, failed: 2 })
+  for (let attempt = 1; attempt < 10; attempt += 1) {
+    assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
   }
   assert.equal(cache.status().exhausted_events, 2)
   shouldFail = false
@@ -694,6 +695,12 @@ test("does not fetch a missing live sender key from the history credential", asy
 
   assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
   assert.equal(keyCalls, 0)
+  assert.equal(cache.status().retryable_events, 0)
+  assert.equal(cache.status().exhausted_events, 1)
+
+  cache.addSigningKeys([{ ...signingKey, user_id: "missing" }])
+  assert.equal(cache.status().retryable_events, 1)
+  assert.equal(cache.status().exhausted_events, 0)
   cache.close()
 })
 

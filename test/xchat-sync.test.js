@@ -30,7 +30,7 @@ test("checkpoints and completes a bounded XChat archive backfill", async () => {
       }),
     },
   })
-  cache.configure({ identity, signing_keys: [signingKey("self")] })
+  cache.configure({ identity, signing_keys: [signingKey("self"), signingKey("sender")] })
   const eventTokens = []
   const api = {
     configured: true,
