@@ -99,3 +99,40 @@ test("uses bounded short retries when X reports remaining quota", async () => {
   assert.equal(calls, 2)
   assert.equal(processor.diagnostics.event, "processing_completed")
 })
+
+test("honors the reset after three persistent short-throttle probes", async () => {
+  let now = 1_700_000_000_000
+  const resetAt = now + 900_000
+  const scheduled = []
+  const processor = new XChatPendingProcessor({
+    cache: {
+      processPending: async () => {
+        const error = new Error("persistent throttle")
+        error.status = 429
+        error.headers = new Headers({
+          "x-rate-limit-remaining": "998",
+          "x-rate-limit-reset": String(resetAt / 1000),
+        })
+        throw error
+      },
+    },
+    now: () => now,
+    scheduleTask: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs })
+      return scheduled.length
+    },
+  })
+
+  processor.request()
+  for (const expectedDelay of [2000, 4000, 8000]) {
+    scheduled.shift().callback()
+    await new Promise(setImmediate)
+    assert.equal(scheduled[0].delayMs, expectedDelay)
+    now += expectedDelay
+  }
+  scheduled.shift().callback()
+  await new Promise(setImmediate)
+
+  assert.equal(scheduled[0].delayMs, 887_000)
+  assert.equal(processor.diagnostics.retry_at, "2023-11-14T22:28:21.000Z")
+})

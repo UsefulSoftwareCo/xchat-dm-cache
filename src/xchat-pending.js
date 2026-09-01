@@ -11,7 +11,7 @@ function retryDelay(error, fallbackDelayMs, now, consecutiveFailures) {
     return Math.max(1000, (retryAfterSeconds * 1000) + 250)
   }
   const remaining = Number(headerValue(error, "x-rate-limit-remaining"))
-  if (Number.isFinite(remaining) && remaining > 0) {
+  if (Number.isFinite(remaining) && remaining > 0 && consecutiveFailures <= 3) {
     return Math.min(60_000, 1000 * (2 ** Math.min(consecutiveFailures, 6)))
   }
   const reset = headerValue(error, "x-rate-limit-reset")
