@@ -305,4 +305,14 @@ export class XChatApi {
     })
     return legacyDmPage(response)
   }
+
+  async listLegacyDmEventsByConversation(conversationId, options = {}) {
+    if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
+    const response = await this.#call(async (client) => {
+      const value = await client.directMessages.getEventsByConversationId(conversationId, legacyDmOptions(options))
+      apiError(value, `List legacy DM events for conversation ${conversationId}`)
+      return value
+    })
+    return legacyDmPage(response)
+  }
 }

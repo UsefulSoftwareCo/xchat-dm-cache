@@ -28,6 +28,10 @@ test("maps official XDK chat responses into cache input", async () => {
         data: [{ id: "dm-2", eventType: "MessageCreate", dmConversationId: `self-${participantId}`, senderId: participantId, participantIds: ["self", participantId], createdAt: "2023-02-01T00:00:00.000Z", text: "older" }],
         meta: {},
       }),
+      getEventsByConversationId: async (conversationId) => ({
+        data: [{ id: "dm-3", eventType: "MessageCreate", dmConversationId: conversationId, senderId: "sender", participantIds: ["self", "sender"], createdAt: "2022-02-01T00:00:00.000Z", text: "group" }],
+        meta: {},
+      }),
     },
   }
   const api = new XChatApi({ client })
@@ -74,6 +78,7 @@ test("maps official XDK chat responses into cache input", async () => {
     next_token: "legacy-next",
   })
   assert.equal((await api.listLegacyDmEventsByParticipant("sender")).events[0].id, "dm-2")
+  assert.equal((await api.listLegacyDmEventsByConversation("group")).events[0].id, "dm-3")
 })
 
 test("refreshes an expired OAuth token and persists the rotated token", async () => {

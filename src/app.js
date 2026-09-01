@@ -456,9 +456,10 @@ export function openApiDocument(publicBaseUrl) {
           summary: "Create a resumable official legacy DM participant backfill",
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
-            required: ["participant_ids", "max_events", "max_pages"],
+            required: ["max_events", "max_pages"],
             properties: {
-              participant_ids: { type: "array", minItems: 1, items: { type: "string" } },
+              participant_ids: { type: "array", items: { type: "string" }, default: [] },
+              conversation_ids: { type: "array", items: { type: "string" }, default: [] },
               max_events: { type: "integer", minimum: 1 },
               max_pages: { type: "integer", minimum: 1 },
             },

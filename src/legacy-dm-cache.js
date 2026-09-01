@@ -165,19 +165,51 @@ export class LegacyDmCache {
       );
       CREATE TABLE IF NOT EXISTS legacy_dm_backfill_targets (
         job_id TEXT NOT NULL,
-        participant_id TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
         position INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         pagination_token TEXT,
         pages_fetched INTEGER NOT NULL DEFAULT 0,
         events_seen INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
-        PRIMARY KEY (job_id, participant_id),
+        PRIMARY KEY (job_id, target_type, target_id),
         FOREIGN KEY (job_id) REFERENCES legacy_dm_backfill_jobs(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS legacy_dm_backfill_next
         ON legacy_dm_backfill_targets (job_id, status, position);
     `)
+    const targetColumns = new Set(
+      this.#db.prepare("PRAGMA table_info(legacy_dm_backfill_targets)").all().map((column) => column.name),
+    )
+    if (!targetColumns.has("target_id")) {
+      this.#db.exec(`
+        ALTER TABLE legacy_dm_backfill_targets RENAME TO legacy_dm_backfill_targets_v1;
+        CREATE TABLE legacy_dm_backfill_targets (
+          job_id TEXT NOT NULL,
+          target_type TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          pagination_token TEXT,
+          pages_fetched INTEGER NOT NULL DEFAULT 0,
+          events_seen INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          PRIMARY KEY (job_id, target_type, target_id),
+          FOREIGN KEY (job_id) REFERENCES legacy_dm_backfill_jobs(id) ON DELETE CASCADE
+        );
+        INSERT INTO legacy_dm_backfill_targets (
+          job_id, target_type, target_id, position, status, pagination_token,
+          pages_fetched, events_seen, last_error
+        )
+        SELECT job_id, 'participant', participant_id, position, status, pagination_token,
+          pages_fetched, events_seen, last_error
+        FROM legacy_dm_backfill_targets_v1;
+        DROP TABLE legacy_dm_backfill_targets_v1;
+        CREATE INDEX legacy_dm_backfill_next
+          ON legacy_dm_backfill_targets (job_id, status, position);
+      `)
+    }
   }
 
   #ensureMarker() {
@@ -340,13 +372,16 @@ export class LegacyDmCache {
     return this.listEvents({ ...options, event_type: "MessageCreate" })
   }
 
-  createBackfillJob({ participant_ids: participantIds, max_events: maxEvents, max_pages: maxPages }) {
-    if (!Array.isArray(participantIds) || participantIds.length === 0) {
-      const error = new Error("participant_ids must contain at least one user ID")
+  createBackfillJob({ participant_ids: participantIds = [], conversation_ids: conversationIds = [], max_events: maxEvents, max_pages: maxPages }) {
+    if (!Array.isArray(participantIds) || !Array.isArray(conversationIds) || participantIds.length + conversationIds.length === 0) {
+      const error = new Error("participant_ids or conversation_ids must contain at least one ID")
       error.status = 400
       throw error
     }
-    const uniqueIds = [...new Set(participantIds.map((value) => requiredString(String(value), "participant_ids[]")))]
+    const targets = [
+      ...participantIds.map((value) => ({ type: "participant", id: requiredString(String(value), "participant_ids[]") })),
+      ...conversationIds.map((value) => ({ type: "conversation", id: requiredString(String(value), "conversation_ids[]") })),
+    ].filter((target, index, values) => values.findIndex((value) => value.type === target.type && value.id === target.id) === index)
     const boundedEvents = Number(maxEvents)
     const boundedPages = Number(maxPages)
     if (!Number.isInteger(boundedEvents) || boundedEvents < 1 || !Number.isInteger(boundedPages) || boundedPages < 1) {
@@ -362,10 +397,10 @@ export class LegacyDmCache {
         VALUES (?, 'pending', ?, ?, ?, ?)
       `).run(id, boundedEvents, boundedPages, timestamp, timestamp)
       const insert = this.#db.prepare(`
-        INSERT INTO legacy_dm_backfill_targets (job_id, participant_id, position)
-        VALUES (?, ?, ?)
+        INSERT INTO legacy_dm_backfill_targets (job_id, target_type, target_id, position)
+        VALUES (?, ?, ?, ?)
       `)
-      uniqueIds.forEach((participantId, index) => insert.run(id, participantId, index + 1))
+      targets.forEach((target, index) => insert.run(id, target.type, target.id, index + 1))
     })
     return this.getBackfillJob(id)
   }
@@ -405,13 +440,13 @@ export class LegacyDmCache {
     return this.getBackfillJob(id)
   }
 
-  updateBackfillTarget(jobId, participantId, values) {
+  updateBackfillTarget(jobId, targetType, targetId, values) {
     const allowed = new Set(["status", "pagination_token", "pages_fetched", "events_seen", "last_error"])
     const entries = Object.entries(values).filter(([key]) => allowed.has(key))
     if (entries.length === 0) return
     const assignments = entries.map(([key]) => `${key} = ?`).join(", ")
-    this.#db.prepare(`UPDATE legacy_dm_backfill_targets SET ${assignments} WHERE job_id = ? AND participant_id = ?`)
-      .run(...entries.map(([, value]) => value), jobId, participantId)
+    this.#db.prepare(`UPDATE legacy_dm_backfill_targets SET ${assignments} WHERE job_id = ? AND target_type = ? AND target_id = ?`)
+      .run(...entries.map(([, value]) => value), jobId, targetType, targetId)
   }
 
   status() {

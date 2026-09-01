@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { test } from "node:test"
 import { LegacyDmCache } from "../src/legacy-dm-cache.js"
 
@@ -54,13 +55,64 @@ test("ingests signed account activity DM webhooks idempotently", async () => {
   cache.close()
 })
 
-test("checkpoints participant backfill targets", async () => {
+test("checkpoints participant and conversation backfill targets", async () => {
   const cache = await createCache()
-  const job = cache.createBackfillJob({ participant_ids: ["one", "two", "one"], max_events: 100, max_pages: 10 })
+  const job = cache.createBackfillJob({
+    participant_ids: ["one", "one"],
+    conversation_ids: ["group-one"],
+    max_events: 100,
+    max_pages: 10,
+  })
   assert.equal(job.targets.total, 2)
   const target = cache.nextBackfillTarget(job.id)
-  assert.equal(target.participant_id, "one")
-  cache.updateBackfillTarget(job.id, "one", { status: "completed", pages_fetched: 1, events_seen: 2 })
-  assert.equal(cache.nextBackfillTarget(job.id).participant_id, "two")
+  assert.deepEqual([target.target_type, target.target_id], ["participant", "one"])
+  cache.updateBackfillTarget(job.id, "participant", "one", { status: "completed", pages_fetched: 1, events_seen: 2 })
+  assert.deepEqual(
+    [cache.nextBackfillTarget(job.id).target_type, cache.nextBackfillTarget(job.id).target_id],
+    ["conversation", "group-one"],
+  )
+  cache.close()
+})
+
+test("migrates existing participant checkpoints to typed targets", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "legacy-dm-cache-migration-"))
+  const filePath = join(directory, "cache.sqlite")
+  const database = new DatabaseSync(filePath)
+  database.exec(`
+    CREATE TABLE legacy_dm_backfill_jobs (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      max_events INTEGER NOT NULL,
+      max_pages INTEGER NOT NULL,
+      pages_fetched INTEGER NOT NULL DEFAULT 0,
+      events_seen INTEGER NOT NULL DEFAULT 0,
+      unique_events INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO legacy_dm_backfill_jobs (id, status, max_events, max_pages, created_at, updated_at)
+    VALUES ('old-job', 'pending', 10, 10, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE legacy_dm_backfill_targets (
+      job_id TEXT NOT NULL,
+      participant_id TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      pagination_token TEXT,
+      pages_fetched INTEGER NOT NULL DEFAULT 0,
+      events_seen INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      PRIMARY KEY (job_id, participant_id)
+    );
+    INSERT INTO legacy_dm_backfill_targets (job_id, participant_id, position)
+    VALUES ('old-job', 'person', 1);
+  `)
+  database.close()
+
+  const cache = await LegacyDmCache.open({ filePath, encryptionSecret: "test-secret" })
+  assert.deepEqual(
+    [cache.nextBackfillTarget("old-job").target_type, cache.nextBackfillTarget("old-job").target_id],
+    ["participant", "person"],
+  )
   cache.close()
 })
