@@ -209,6 +209,45 @@ test("reuses persisted signing keys across event pages", async () => {
   cache.close()
 })
 
+test("does not repeat an empty signing-key lookup on every event page", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-empty-signing-keys-"))
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
+  })
+  cache.configure({ identity, signing_keys: [signingKey("self")] })
+  let signingKeyRequests = 0
+  let eventPages = 0
+  const api = {
+    configured: true,
+    listConversations: async () => ({
+      data: [{ id: "conversation-1", participant_ids: ["self", "no-key"] }],
+      next_token: null,
+      has_more: false,
+    }),
+    getSigningKeys: async () => {
+      signingKeyRequests += 1
+      return []
+    },
+    listConversationEvents: async () => {
+      eventPages += 1
+      return eventPages === 1
+        ? { events: [], key_events: [], next_token: "next", has_more: true }
+        : { events: [], key_events: [], next_token: null, has_more: false }
+    },
+  }
+  const sync = new XChatSync({ api, cache })
+  const job = sync.createJob({ max_events: 10, max_pages: 10 })
+
+  const result = await sync.runJob(job.id)
+
+  assert.equal(result.status, "completed")
+  assert.equal(eventPages, 2)
+  assert.equal(signingKeyRequests, 1)
+  cache.close()
+})
+
 test("raises an existing backfill cap without losing its checkpoint", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-sync-raise-limit-"))
   const cache = await XChatCache.open({

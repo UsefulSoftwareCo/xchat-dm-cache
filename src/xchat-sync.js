@@ -19,6 +19,7 @@ function rateLimitDelay(error, fallbackDelayMs, now) {
 export class XChatSync {
   #api
   #cache
+  #checkedSigningKeyUsers = new Set()
   #running = new Map()
   #scheduled = new Set()
   #scheduleTask
@@ -137,8 +138,9 @@ export class XChatSync {
     }
     const participantIds = JSON.parse(conversation.participant_ids_json)
     for (const participantId of participantIds) {
-      if (this.#cache.hasSigningKeys(participantId)) continue
+      if (this.#cache.hasSigningKeys(participantId) || this.#checkedSigningKeyUsers.has(participantId)) continue
       const keys = await this.#api.getSigningKeys(participantId)
+      this.#checkedSigningKeyUsers.add(participantId)
       if (keys.length > 0) this.#cache.addSigningKeys(keys)
     }
     const remainingEvents = Math.max(1, job.max_events - job.events_seen)
