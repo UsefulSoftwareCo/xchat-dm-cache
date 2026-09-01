@@ -416,6 +416,10 @@ export class XChatCache {
     return { signing_key_count: normalized.length }
   }
 
+  hasSigningKeys(userId) {
+    return Boolean(this.#db.prepare("SELECT 1 FROM xchat_signing_keys WHERE user_id = ? LIMIT 1").get(userId))
+  }
+
   #upsertSigningKeys(signingKeys, updatedAt) {
     const statement = this.#db.prepare(`
       INSERT INTO xchat_signing_keys (

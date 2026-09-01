@@ -6,6 +6,16 @@ function isRateLimitError(error) {
   return Number(error?.status ?? error?.response?.status) === 429 || /\b429\b|too many requests|rate limit/i.test(String(error?.message ?? error))
 }
 
+function rateLimitDelay(error, fallbackDelayMs, now) {
+  const headers = error?.headers ?? error?.response?.headers
+  const reset = headers?.get?.("x-rate-limit-reset")
+    ?? headers?.["x-rate-limit-reset"]
+    ?? headers?.["X-Rate-Limit-Reset"]
+  const resetAtMs = Number(reset) * 1000
+  if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return fallbackDelayMs
+  return Math.max(1000, resetAtMs - now() + 1000)
+}
+
 export class XChatSync {
   #api
   #cache
@@ -13,17 +23,20 @@ export class XChatSync {
   #scheduled = new Set()
   #scheduleTask
   #rateLimitRetryDelayMs
+  #now
 
   constructor({
     api,
     cache,
     scheduleTask = (callback, delayMs) => delayMs > 0 ? setTimeout(callback, delayMs) : setImmediate(callback),
     rateLimitDelayMs = rateLimitRetryDelayMs,
+    now = Date.now,
   }) {
     this.#api = api
     this.#cache = cache
     this.#scheduleTask = scheduleTask
     this.#rateLimitRetryDelayMs = rateLimitDelayMs
+    this.#now = now
   }
 
   get configured() {
@@ -91,11 +104,12 @@ export class XChatSync {
       return this.#cache.getBackfillJob(jobId)
     } catch (error) {
       if (isRateLimitError(error)) {
+        const retryDelayMs = rateLimitDelay(error, this.#rateLimitRetryDelayMs, this.#now)
         const job = this.#cache.updateBackfillJob(jobId, {
           status: "pending",
           last_error: rateLimitRetryMessage,
         })
-        this.schedule(jobId, this.#rateLimitRetryDelayMs)
+        this.schedule(jobId, retryDelayMs)
         return job
       }
       return this.#cache.updateBackfillJob(jobId, {
@@ -123,6 +137,7 @@ export class XChatSync {
     }
     const participantIds = JSON.parse(conversation.participant_ids_json)
     for (const participantId of participantIds) {
+      if (this.#cache.hasSigningKeys(participantId)) continue
       const keys = await this.#api.getSigningKeys(participantId)
       if (keys.length > 0) this.#cache.addSigningKeys(keys)
     }

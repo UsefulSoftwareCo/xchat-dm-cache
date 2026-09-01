@@ -138,6 +138,77 @@ test("checkpoints rate limits and schedules a delayed retry", async () => {
   cache.close()
 })
 
+test("retries at the reset time reported by X", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-rate-reset-"))
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
+  })
+  cache.configure({ identity, signing_keys: [signingKey("self")] })
+  const api = {
+    configured: true,
+    listConversations: async () => ({ data: [{ id: "conversation-1", participant_ids: ["self"] }], next_token: null, has_more: false }),
+    getSigningKeys: async () => [],
+    listConversationEvents: async () => {
+      const error = new Error("HTTP 429: Too Many Requests")
+      error.status = 429
+      error.headers = new Headers({ "x-rate-limit-reset": "1700000030" })
+      throw error
+    },
+  }
+  const scheduled = []
+  const sync = new XChatSync({
+    api,
+    cache,
+    now: () => 1700000000000,
+    scheduleTask: (callback, delayMs) => scheduled.push({ callback, delayMs }),
+  })
+  const job = sync.createJob({ max_events: 10, max_pages: 10 })
+
+  sync.schedule(job.id)
+  await scheduled.shift().callback()
+  await new Promise(setImmediate)
+
+  assert.equal(scheduled[0].delayMs, 31000)
+  cache.close()
+})
+
+test("reuses persisted signing keys across event pages", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-signing-keys-"))
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
+  })
+  cache.configure({ identity, signing_keys: [signingKey("self")] })
+  let signingKeyRequests = 0
+  let eventPages = 0
+  const api = {
+    configured: true,
+    listConversations: async () => ({ data: [{ id: "conversation-1", participant_ids: ["self", "sender"] }], next_token: null, has_more: false }),
+    getSigningKeys: async (userId) => {
+      signingKeyRequests += 1
+      return [signingKey(userId)]
+    },
+    listConversationEvents: async () => {
+      eventPages += 1
+      return eventPages === 1
+        ? { events: [], key_events: [], next_token: "next", has_more: true }
+        : { events: [], key_events: [], next_token: null, has_more: false }
+    },
+  }
+  const sync = new XChatSync({ api, cache })
+  const job = sync.createJob({ max_events: 10, max_pages: 10 })
+
+  const result = await sync.runJob(job.id)
+
+  assert.equal(result.status, "completed")
+  assert.equal(eventPages, 2)
+  assert.equal(signingKeyRequests, 1)
+  cache.close()
+})
+
 test("raises an existing backfill cap without losing its checkpoint", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-sync-raise-limit-"))
   const cache = await XChatCache.open({
