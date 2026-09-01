@@ -137,3 +137,45 @@ test("checkpoints rate limits and schedules a delayed retry", async () => {
   assert.equal(eventAttempts, 2)
   cache.close()
 })
+
+test("raises an existing backfill cap without losing its checkpoint", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-raise-limit-"))
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
+  })
+  cache.configure({ identity, signing_keys: [signingKey("self")] })
+  const job = cache.createBackfillJob({ max_events: 10, max_pages: 20 })
+  cache.updateBackfillJob(job.id, {
+    status: "paused",
+    pages_fetched: 4,
+    events_seen: 10,
+    unique_events: 9,
+    last_error: "Configured backfill limit reached",
+  })
+
+  const raised = cache.raiseBackfillJobLimits(job.id, { max_events: 50, max_pages: 100 })
+
+  assert.equal(raised.status, "pending")
+  assert.equal(raised.max_events, 50)
+  assert.equal(raised.max_pages, 100)
+  assert.equal(raised.pages_fetched, 4)
+  assert.equal(raised.events_seen, 10)
+  assert.equal(raised.unique_events, 9)
+  assert.equal(raised.last_error, null)
+  cache.close()
+})
+
+test("rejects an empty backfill limit update", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-empty-limit-"))
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
+  })
+  const job = cache.createBackfillJob({ max_events: 10, max_pages: 20 })
+
+  assert.throws(() => cache.raiseBackfillJobLimits(job.id, {}), /max_events or max_pages is required/)
+  cache.close()
+})

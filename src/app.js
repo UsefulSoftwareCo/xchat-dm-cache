@@ -178,6 +178,14 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
         return json(response, 200, job)
       }
 
+      if (backfillJobMatch && request.method === "PATCH") {
+        if (!xchatCache || !xchatSync) return cacheUnavailable(response)
+        const job = xchatCache.raiseBackfillJobLimits(decodeURIComponent(backfillJobMatch[1]), await readJson(request))
+        if (!job) return json(response, 404, { error: "XChat backfill job was not found" })
+        xchatSync.schedule(job.id)
+        return json(response, 200, job)
+      }
+
       const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent)
       if (segments[0] !== "state" || segments.length < 2 || segments.length > 3) {
         return json(response, 404, { error: "Not found" })
@@ -466,6 +474,20 @@ export function openApiDocument(publicBaseUrl) {
           summary: "Resume one durable XChat archive backfill job",
           parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
           responses: { "200": { description: "Current backfill job state" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
+        },
+        patch: {
+          operationId: "raiseXChatBackfillJobLimits",
+          summary: "Raise the limits for one durable XChat backfill job",
+          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            properties: {
+              max_events: { type: "integer", minimum: 1, description: "New event-read limit; it cannot lower the current limit" },
+              max_pages: { type: "integer", minimum: 1, description: "New API page limit; it cannot lower the current limit" },
+            },
+            minProperties: 1,
+          } } } },
+          responses: { "200": { description: "Updated backfill job" }, "400": { description: "Invalid limits" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
         },
       },
       "/state/{namespace}": {

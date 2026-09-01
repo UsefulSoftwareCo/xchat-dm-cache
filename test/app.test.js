@@ -17,6 +17,7 @@ let baseUrl
 const acceptedWebhooks = []
 let processCount = 0
 const backfillJob = { id: "00000000-0000-4000-8000-000000000001", status: "pending" }
+const raisedBackfillJob = { ...backfillJob, max_events: 50000, max_pages: 5000 }
 const scheduledJobs = []
 
 before(async () => {
@@ -38,6 +39,7 @@ before(async () => {
       processPending: async () => { processCount += 1 },
       listBackfillJobs: () => ({ data: [backfillJob] }),
       getBackfillJob: (id) => id === backfillJob.id ? backfillJob : null,
+      raiseBackfillJobLimits: (id) => id === backfillJob.id ? raisedBackfillJob : null,
     },
     xchatSync: {
       createJob: () => backfillJob,
@@ -92,6 +94,7 @@ test("publishes a valid OpenAPI document", async () => {
   assert.equal(document.paths["/xchat/cache/messages"].get.operationId, "listCachedXChatMessages")
   assert.equal(document.paths["/xchat/cache/events"].get.operationId, "listCachedXChatEvents")
   assert.equal(document.paths["/xchat/cache/backfill-jobs"].post.operationId, "createXChatBackfillJob")
+  assert.equal(document.paths["/xchat/cache/backfill-jobs/{job_id}"].patch.operationId, "raiseXChatBackfillJobLimits")
 })
 
 test("answers X webhook CRC challenges", async () => {
@@ -150,4 +153,13 @@ test("creates and inspects bounded XChat backfill jobs", async () => {
   const read = await fetch(`${baseUrl}/xchat/cache/backfill-jobs/${backfillJob.id}`, { headers })
   assert.equal(read.status, 200)
   assert.deepEqual(await read.json(), backfillJob)
+
+  const raised = await fetch(`${baseUrl}/xchat/cache/backfill-jobs/${backfillJob.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ max_events: 50000, max_pages: 5000 }),
+  })
+  assert.equal(raised.status, 200)
+  assert.deepEqual(await raised.json(), raisedBackfillJob)
+  assert.deepEqual(scheduledJobs, [backfillJob.id, backfillJob.id])
 })

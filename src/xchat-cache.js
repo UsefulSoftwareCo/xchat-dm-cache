@@ -819,9 +819,32 @@ export class XChatCache {
     return { data: this.#db.prepare("SELECT * FROM xchat_backfill_jobs ORDER BY created_at DESC LIMIT ?").all(boundedLimit) }
   }
 
+  raiseBackfillJobLimits(id, { max_events: maxEvents, max_pages: maxPages }) {
+    const job = this.getBackfillJob(id)
+    if (!job) return null
+    if (maxEvents === undefined && maxPages === undefined) {
+      const error = new Error("max_events or max_pages is required")
+      error.status = 400
+      throw error
+    }
+    const nextEvents = maxEvents === undefined ? job.max_events : Number(maxEvents)
+    const nextPages = maxPages === undefined ? job.max_pages : Number(maxPages)
+    if (!Number.isInteger(nextEvents) || nextEvents < job.max_events || !Number.isInteger(nextPages) || nextPages < job.max_pages) {
+      const error = new Error("max_events and max_pages must be integers that do not lower the current limits")
+      error.status = 400
+      throw error
+    }
+    const resume = job.status === "paused" && job.last_error === "Configured backfill limit reached"
+    return this.updateBackfillJob(id, {
+      max_events: nextEvents,
+      max_pages: nextPages,
+      ...(resume ? { status: "pending", last_error: null } : {}),
+    })
+  }
+
   updateBackfillJob(id, values) {
     const allowed = new Set([
-      "status", "stage", "pages_fetched", "events_seen", "unique_events", "conversation_cursor", "last_error",
+      "status", "stage", "max_events", "max_pages", "pages_fetched", "events_seen", "unique_events", "conversation_cursor", "last_error",
     ])
     const entries = Object.entries(values).filter(([key]) => allowed.has(key))
     if (entries.length === 0) return this.getBackfillJob(id)
