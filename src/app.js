@@ -118,7 +118,7 @@ export function openApiDocument(publicBaseUrl) {
 
   return {
     openapi: "3.1.0",
-    info: { title: "Executor State Handler", version: "0.1.0" },
+    info: { title: "Executor State Handler", version: "0.2.0" },
     ...(publicBaseUrl ? { servers: [{ url: publicBaseUrl }] } : {}),
     components: {
       securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
