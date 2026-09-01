@@ -175,6 +175,42 @@ test("does not fan out a batch infrastructure failure", async () => {
   cache.close()
 })
 
+test("stops isolated retries when a signing-key refresh is throttled", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-key-throttle-"))
+  let decryptCalls = 0
+  let keyCalls = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: {
+      decrypt: async () => {
+        decryptCalls += 1
+        return { messages: [], errors: { "0": "missing signing key" } }
+      },
+    },
+    signingKeyProvider: async () => {
+      keyCalls += 1
+      const error = new Error("HTTP 429: Too Many Requests")
+      error.status = 429
+      throw error
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [
+      { event_uuid: "throttled-1", sender_id: "missing", encoded_event: "ciphertext-1" },
+      { event_uuid: "throttled-2", sender_id: "missing", encoded_event: "ciphertext-2" },
+    ],
+  })
+
+  await assert.rejects(() => cache.processPending(), /429/)
+  assert.equal(decryptCalls, 2)
+  assert.equal(keyCalls, 1)
+  assert.equal(cache.status().pending_events, 2)
+  cache.close()
+})
+
 test("persists key events and pending ciphertext across a restart", async () => {
   const { cache, filePath } = await cacheFixture()
   cache.ingestBackfill({

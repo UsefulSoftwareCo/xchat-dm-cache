@@ -91,6 +91,11 @@ function retryIndividually(message) {
   return error
 }
 
+function stopsRetryFanout(error) {
+  const status = Number(error?.status ?? error?.response?.status)
+  return status === 401 || status === 403 || status === 429 || status >= 500
+}
+
 function encodeCursor(row) {
   return Buffer.from(JSON.stringify({ created_at: row.created_at, event_id: row.event_id })).toString("base64url")
 }
@@ -646,6 +651,7 @@ export class XChatCache {
               await this.#processEvent(row)
               processed += 1
             } catch (error) {
+              if (stopsRetryFanout(error)) throw error
               failed += 1
               this.#db.prepare(`
                 UPDATE xchat_events
