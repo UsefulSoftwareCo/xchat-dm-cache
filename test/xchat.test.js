@@ -111,3 +111,42 @@ test("fails closed when the PIN is not configured", async () => {
   const decryptor = new XChatDecryptor({ createChat: async () => ({}), pin: "" })
   await assert.rejects(() => decryptor.decrypt({}), /PIN is not configured/)
 })
+
+test("reports count-only decryption diagnostics", async () => {
+  const diagnostics = []
+  const decryptor = new XChatDecryptor({
+    pin: "safe-pin",
+    diagnostic: (event, fields) => diagnostics.push({ event, ...fields }),
+    createChat: async () => ({
+      unlock: async () => {},
+      setIdentity: () => {},
+      setCacheKeys: () => {},
+      setSigningKeys: () => {},
+      decryptEvents: () => ({ messages: [], errors: { 0: "invalid" } }),
+    }),
+  })
+
+  await decryptor.decrypt({
+    identity: { user_id: "10", public_key_version: "20", juicebox_config: {} },
+    signing_keys: [{
+      user_id: "10",
+      public_key_version: "20",
+      public_key: "identity-key",
+      signing_public_key: "signing-key",
+      identity_public_key_signature: "signature",
+    }],
+    key_events: ["secret-key-event"],
+    events: ["secret-message-event"],
+  })
+
+  assert.deepEqual(diagnostics.map(({ event }) => event), [
+    "session_unlock_started",
+    "session_unlock_completed",
+    "decrypt_started",
+    "decrypt_completed",
+  ])
+  assert.equal(diagnostics.at(-1).key_event_count, 1)
+  assert.equal(diagnostics.at(-1).event_count, 1)
+  assert.equal(diagnostics.at(-1).error_count, 1)
+  assert.equal(JSON.stringify(diagnostics).includes("secret"), false)
+})

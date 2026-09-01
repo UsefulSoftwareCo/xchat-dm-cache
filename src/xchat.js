@@ -47,15 +47,17 @@ function valueFingerprint(value) {
 
 export class XChatDecryptor {
   #createChat
+  #diagnostic
   #pin
   #session
   #fingerprint
   #signingKeysFingerprint
   #hydratedKeySets = new Set()
 
-  constructor({ createChat, pin }) {
+  constructor({ createChat, pin, diagnostic = () => {} }) {
     this.#createChat = createChat
     this.#pin = pin
+    this.#diagnostic = diagnostic
   }
 
   get configured() {
@@ -109,7 +111,29 @@ export class XChatDecryptor {
     const keySetFingerprint = valueFingerprint(keyEvents)
     const hydrateKeys = keyEvents.length > 0 && !this.#hydratedKeySets.has(keySetFingerprint)
     const includedKeyEvents = hydrateKeys ? keyEvents : []
-    const result = session.decryptEvents([...includedKeyEvents, ...events])
+    const startedAt = Date.now()
+    this.#diagnostic("decrypt_started", {
+      key_event_count: includedKeyEvents.length,
+      event_count: events.length,
+    })
+    let result
+    try {
+      result = session.decryptEvents([...includedKeyEvents, ...events])
+    } catch (error) {
+      this.#diagnostic("decrypt_failed", {
+        key_event_count: includedKeyEvents.length,
+        event_count: events.length,
+        duration_ms: Date.now() - startedAt,
+      })
+      throw error
+    }
+    this.#diagnostic("decrypt_completed", {
+      key_event_count: includedKeyEvents.length,
+      event_count: events.length,
+      duration_ms: Date.now() - startedAt,
+      error_count: Object.keys(result?.errors ?? {}).length,
+      message_count: Array.isArray(result?.messages) ? result.messages.length : 0,
+    })
     const errorIndexes = Object.keys(result?.errors ?? {}).map(Number).filter(Number.isFinite)
     if (hydrateKeys && errorIndexes.every((index) => index >= includedKeyEvents.length)) {
       this.#hydratedKeySets.add(keySetFingerprint)
@@ -133,6 +157,8 @@ export class XChatDecryptor {
     this.#fingerprint = fingerprint
     this.#signingKeysFingerprint = undefined
     this.#hydratedKeySets.clear()
+    const unlockStartedAt = Date.now()
+    this.#diagnostic("session_unlock_started", {})
     this.#session = Promise.resolve(
       this.#createChat({
         juiceboxConfig: configJson,
@@ -142,8 +168,10 @@ export class XChatDecryptor {
       await chat.unlock(this.#pin)
       chat.setIdentity(userId, publicKeyVersion)
       chat.setCacheKeys(true)
+      this.#diagnostic("session_unlock_completed", { duration_ms: Date.now() - unlockStartedAt })
       return chat
     }).catch((error) => {
+      this.#diagnostic("session_unlock_failed", { duration_ms: Date.now() - unlockStartedAt })
       this.#session = undefined
       this.#fingerprint = undefined
       this.#signingKeysFingerprint = undefined

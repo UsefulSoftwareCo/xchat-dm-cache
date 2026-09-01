@@ -12,7 +12,11 @@ const port = Number.parseInt(process.env.PORT ?? "3000", 10)
 const stateFile = process.env.STATE_FILE ?? "./data/state.json"
 const store = new JsonStore(stateFile)
 await store.load()
-const xchat = new XChatDecryptor({ createChat, pin: process.env.XCHAT_PIN })
+const xchat = new XChatDecryptor({
+  createChat,
+  pin: process.env.XCHAT_PIN,
+  diagnostic: (event, fields) => console.log(JSON.stringify({ component: "xchat_decryptor", event, ...fields })),
+})
 const xchatApi = new XChatApi({
   accessToken: process.env.X_OAUTH2_ACCESS_TOKEN,
   refreshToken: process.env.X_OAUTH2_REFRESH_TOKEN,
