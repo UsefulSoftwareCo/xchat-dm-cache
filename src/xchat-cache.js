@@ -1099,6 +1099,79 @@ export class XChatCache {
     `).get(jobId)
   }
 
+  getBackfillWorkItem(jobId) {
+    const job = this.getBackfillJob(jobId)
+    if (!job || job.stage !== "events" || !["pending", "running"].includes(job.status)) return null
+    const conversation = this.nextBackfillConversation(jobId)
+    if (!conversation) return null
+    return {
+      job_id: job.id,
+      conversation: {
+        id: conversation.conversation_id,
+        type: conversation.type,
+        participant_ids: JSON.parse(conversation.participant_ids_json),
+      },
+      event_cursor: conversation.event_cursor,
+      max_results: Math.min(100, Math.max(1, job.max_events - job.events_seen)),
+    }
+  }
+
+  checkpointBackfillPage({
+    job_id: jobId,
+    conversation_id: conversationId,
+    expected_cursor: expectedCursor,
+    next_token: nextToken,
+    has_more: hasMore,
+    event_count: eventCount,
+    inserted_count: insertedCount,
+  }) {
+    const job = this.getBackfillJob(jobId)
+    if (!job) {
+      const error = new Error("XChat backfill job was not found")
+      error.status = 404
+      throw error
+    }
+    if (job.stage !== "events" || !["pending", "running"].includes(job.status)) {
+      const error = new Error("XChat backfill job is not accepting event pages")
+      error.status = 409
+      throw error
+    }
+    const conversation = this.nextBackfillConversation(jobId)
+    if (
+      !conversation
+      || conversation.conversation_id !== conversationId
+      || (conversation.event_cursor ?? null) !== (expectedCursor ?? null)
+    ) {
+      const error = new Error("XChat backfill checkpoint no longer matches the active work item")
+      error.status = 409
+      throw error
+    }
+    const boundedEventCount = Number(eventCount)
+    const boundedInsertedCount = Number(insertedCount)
+    if (!Number.isInteger(boundedEventCount) || boundedEventCount < 0 || !Number.isInteger(boundedInsertedCount) || boundedInsertedCount < 0) {
+      const error = new Error("event_count and inserted_count must be non-negative integers")
+      error.status = 400
+      throw error
+    }
+    const conversationComplete = !hasMore || typeof nextToken !== "string" || nextToken.length === 0
+    this.#transaction(() => {
+      this.#db.prepare(`
+        UPDATE xchat_backfill_job_conversations
+        SET status = ?, event_cursor = ?, pages_fetched = pages_fetched + 1,
+            events_seen = events_seen + ?, last_error = NULL
+        WHERE job_id = ? AND conversation_id = ?
+      `).run(conversationComplete ? "completed" : "running", nextToken ?? null, boundedEventCount, jobId, conversationId)
+      this.#db.prepare(`
+        UPDATE xchat_backfill_jobs
+        SET pages_fetched = pages_fetched + 1,
+            events_seen = events_seen + ?, unique_events = unique_events + ?,
+            last_error = NULL, updated_at = ?
+        WHERE id = ?
+      `).run(boundedEventCount, boundedInsertedCount, nowIso(), jobId)
+    })
+    return { job: this.getBackfillJob(jobId), conversation_complete: conversationComplete }
+  }
+
   updateBackfillConversation(jobId, conversationId, values) {
     const allowed = new Set(["status", "event_cursor", "pages_fetched", "events_seen", "last_error"])
     const entries = Object.entries(values).filter(([key]) => allowed.has(key))
@@ -1137,6 +1210,9 @@ export class XChatCache {
           WHERE k.user_id = CAST(participant.value AS TEXT)
         )
     `).get().count
+    const backfillWorkItems = this.listBackfillJobs({ limit: 100 }).data
+      .map((job) => this.getBackfillWorkItem(job.id))
+      .filter(Boolean)
     return {
       configured: Boolean(this.#identityOrNull()),
       signing_keys: count("xchat_signing_keys"),
@@ -1151,6 +1227,7 @@ export class XChatCache {
       distinct_participants: distinctParticipants,
       participants_without_keys: participantsWithoutKeys,
       missing_participant_key_user_ids: this.listMissingParticipantKeyUsers({ limit: 1000 }).data.map(({ user_id: userId }) => userId),
+      backfill_work_items: backfillWorkItems,
       decrypted_events: count("xchat_decrypted_events"),
       messages: count("xchat_decrypted_events", "WHERE event_type = 'message'"),
       webhook_deliveries: count("xchat_webhook_deliveries"),

@@ -105,6 +105,7 @@ test("deduplicates backfill events and encrypts private values at rest", async (
     distinct_participants: 2,
     participants_without_keys: 1,
     missing_participant_key_user_ids: ["self"],
+    backfill_work_items: [],
     decrypted_events: 1,
     messages: 1,
     webhook_deliveries: 0,
@@ -726,6 +727,40 @@ test("lists conversation participants before their events arrive", async () => {
   assert.deepEqual(second.data, [{ user_id: "future-b" }])
   assert.equal(cache.status().distinct_participants, 3)
   assert.equal(cache.status().participants_without_keys, 2)
+  cache.close()
+})
+
+test("checkpoints an externally fetched backfill page with compare-and-set", async () => {
+  const { cache } = await cacheFixture()
+  const job = cache.createBackfillJob({ max_events: 1000, max_pages: 100 })
+  cache.updateBackfillJob(job.id, { stage: "events" })
+  cache.addBackfillJobConversations(job.id, [{ id: "external-conversation", participant_ids: ["self", "sender"] }])
+  const first = cache.getBackfillWorkItem(job.id)
+  assert.equal(first.event_cursor, null)
+
+  const checkpoint = cache.checkpointBackfillPage({
+    job_id: job.id,
+    conversation_id: first.conversation.id,
+    expected_cursor: null,
+    next_token: "next-page",
+    has_more: true,
+    event_count: 100,
+    inserted_count: 90,
+  })
+  assert.equal(checkpoint.conversation_complete, false)
+  assert.equal(checkpoint.job.pages_fetched, 1)
+  assert.equal(checkpoint.job.events_seen, 100)
+  assert.equal(checkpoint.job.unique_events, 90)
+  assert.equal(cache.getBackfillWorkItem(job.id).event_cursor, "next-page")
+  assert.throws(() => cache.checkpointBackfillPage({
+    job_id: job.id,
+    conversation_id: first.conversation.id,
+    expected_cursor: null,
+    next_token: null,
+    has_more: false,
+    event_count: 1,
+    inserted_count: 1,
+  }), (error) => error.status === 409)
   cache.close()
 })
 

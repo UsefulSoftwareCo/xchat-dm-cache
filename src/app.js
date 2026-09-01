@@ -118,9 +118,18 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
 
       if (url.pathname === "/xchat/cache/backfill" && request.method === "POST") {
         if (!xchatCache) return cacheUnavailable(response)
-        const result = xchatCache.ingestBackfill(await readJson(request))
+        const body = await readJson(request)
+        const result = xchatCache.ingestBackfill(body)
+        const checkpoint = body.checkpoint
+          ? xchatCache.checkpointBackfillPage({
+            ...body.checkpoint,
+            conversation_id: body.conversation.id,
+            event_count: body.events.length,
+            inserted_count: result.inserted,
+          })
+          : null
         const processing = await xchatCache.processPending({ limit: 1000 })
-        return json(response, 200, { ...result, processing })
+        return json(response, 200, { ...result, processing, checkpoint })
       }
 
       if (url.pathname === "/xchat/cache/process" && request.method === "POST") {
@@ -394,6 +403,16 @@ export function openApiDocument(publicBaseUrl) {
                     created_at: { type: "string", format: "date-time" },
                   },
                 } },
+                checkpoint: {
+                  type: "object",
+                  required: ["job_id", "expected_cursor", "has_more"],
+                  properties: {
+                    job_id: { type: "string", format: "uuid" },
+                    expected_cursor: { type: ["string", "null"] },
+                    next_token: { type: ["string", "null"] },
+                    has_more: { type: "boolean" },
+                  },
+                },
               },
             } } },
           },
