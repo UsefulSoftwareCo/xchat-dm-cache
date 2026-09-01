@@ -421,6 +421,19 @@ test("drains events inserted while processing is active", async () => {
   cache.close()
 })
 
+test("returns after the requested pending-event limit", async () => {
+  const { cache } = await cacheFixture()
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: ["one", "two", "three"].map((id) => ({ event_uuid: id, encoded_event: id })),
+  })
+
+  assert.deepEqual(await cache.processPending({ limit: 2 }), { selected: 2, processed: 2, failed: 0 })
+  assert.equal(cache.status().pending_events, 1)
+  assert.deepEqual(await cache.processPending({ limit: 2 }), { selected: 1, processed: 1, failed: 0 })
+  cache.close()
+})
+
 test("replays conversation key events in ingestion order", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-cache-order-"))
   let observedKeyEvents

@@ -60,6 +60,7 @@ test("coalesces requests and retries pending processing after a rate limit", asy
 })
 
 test("uses bounded short retries when X reports remaining quota", async () => {
+  const now = 1_700_000_000_000
   let calls = 0
   const scheduled = []
   const processor = new XChatPendingProcessor({
@@ -79,6 +80,7 @@ test("uses bounded short retries when X reports remaining quota", async () => {
         return { selected: 1, processed: 1, failed: 0 }
       },
     },
+    now: () => now,
     scheduleTask: (callback, delayMs) => {
       scheduled.push({ callback, delayMs })
       return scheduled.length
@@ -135,4 +137,34 @@ test("honors the reset after three persistent short-throttle probes", async () =
 
   assert.equal(scheduled[0].delayMs, 887_000)
   assert.equal(processor.diagnostics.retry_at, "2023-11-14T22:28:21.000Z")
+})
+
+test("continues a full bounded pending-event drain in a new task", async () => {
+  let calls = 0
+  const scheduled = []
+  const processor = new XChatPendingProcessor({
+    cache: {
+      processPending: async () => {
+        calls += 1
+        return calls === 1
+          ? { selected: 1000, processed: 1000, failed: 0 }
+          : { selected: 1, processed: 1, failed: 0 }
+      },
+    },
+    scheduleTask: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs })
+      return scheduled.length
+    },
+  })
+
+  processor.request()
+  scheduled.shift().callback()
+  await new Promise(setImmediate)
+  assert.equal(scheduled.length, 1)
+  assert.equal(scheduled[0].delayMs, 0)
+
+  scheduled.shift().callback()
+  await new Promise(setImmediate)
+  assert.equal(calls, 2)
+  assert.equal(scheduled.length, 0)
 })

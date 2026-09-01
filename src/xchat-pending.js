@@ -119,6 +119,7 @@ export class XChatPendingProcessor {
         processed: result.processed,
         failed: result.failed,
       })
+      if (result.selected >= 1000) this.#requested = true
     } catch (error) {
       this.#consecutiveFailures += 1
       const delayMs = retryDelay(error, this.#retryDelayMs, this.#now, this.#consecutiveFailures)

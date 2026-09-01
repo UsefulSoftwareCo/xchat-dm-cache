@@ -669,7 +669,6 @@ export class XChatCache {
           }
         }
       }
-      if (rows.length === boundedLimit) this.#processRequested = true
     } while (this.#processRequested)
     return { selected, processed, failed }
   }
