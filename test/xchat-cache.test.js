@@ -177,6 +177,41 @@ test("deduplicates live webhook deliveries and message events", async () => {
   cache.close()
 })
 
+test("retries webhook events after a decryption failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-retry-"))
+  let attempts = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: {
+      decrypt: async (body) => {
+        attempts += 1
+        if (attempts === 1) throw new Error("temporary decryptor failure")
+        return decryptor([]).decrypt(body)
+      },
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.acceptWebhook({
+    data: {
+      event_type: "chat.received",
+      event_uuid: "webhook-retry-1",
+      payload: {
+        conversation_id: "conversation-1",
+        sender_id: "sender",
+        encoded_event: "retry-ciphertext",
+      },
+    },
+  })
+
+  assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
+  assert.equal(cache.status().pending_events, 1)
+  assert.deepEqual(await cache.processPending(), { selected: 1, processed: 1, failed: 0 })
+  assert.equal(cache.status().pending_events, 0)
+  assert.equal(cache.status().messages, 1)
+  cache.close()
+})
+
 test("accepts the conversation join event spelling emitted by X", async () => {
   const { cache } = await cacheFixture()
   const body = {

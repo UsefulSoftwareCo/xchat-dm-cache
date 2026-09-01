@@ -599,7 +599,7 @@ export class XChatCache {
       this.#processRequested = false
       const rows = this.#db.prepare(`
         SELECT * FROM xchat_events
-        WHERE status = 'pending' AND attempts < 10
+        WHERE status IN ('pending', 'failed') AND attempts < 10
         ORDER BY received_at ASC
         LIMIT ?
       `).all(boundedLimit)
