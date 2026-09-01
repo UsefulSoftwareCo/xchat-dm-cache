@@ -150,7 +150,11 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
 
       if (url.pathname === "/xchat/cache/status" && request.method === "GET") {
         if (!xchatCache) return cacheUnavailable(response)
-        return json(response, 200, { ...xchatCache.status(), decryption: xchat?.diagnostics ?? null })
+        return json(response, 200, {
+          ...xchatCache.status(),
+          decryption: xchat?.diagnostics ?? null,
+          backfill: xchatSync?.diagnostics ?? null,
+        })
       }
 
       if (url.pathname === "/xchat/cache/backfill-jobs" && request.method === "POST") {

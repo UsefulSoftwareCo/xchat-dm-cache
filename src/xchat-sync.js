@@ -20,6 +20,7 @@ export class XChatSync {
   #api
   #cache
   #checkedSigningKeyUsers = new Set()
+  #lastDiagnostic = null
   #running = new Map()
   #scheduled = new Set()
   #scheduleTask
@@ -42,6 +43,14 @@ export class XChatSync {
 
   get configured() {
     return this.#api.configured
+  }
+
+  get diagnostics() {
+    return this.#lastDiagnostic
+  }
+
+  #report(event, fields = {}) {
+    this.#lastDiagnostic = { event, ...fields, recorded_at: new Date().toISOString() }
   }
 
   createJob(options) {
@@ -121,7 +130,15 @@ export class XChatSync {
   }
 
   async #fetchConversationPage(job) {
-    const page = await this.#api.listConversations({ paginationToken: job.conversation_cursor, maxResults: 100 })
+    this.#report("conversation_list_started")
+    let page
+    try {
+      page = await this.#api.listConversations({ paginationToken: job.conversation_cursor, maxResults: 100 })
+    } catch (error) {
+      this.#report("conversation_list_failed", { status: Number(error?.status ?? error?.response?.status) || null })
+      throw error
+    }
+    this.#report("conversation_list_completed", { conversation_count: page.data.length })
     this.#cache.addBackfillJobConversations(job.id, page.data)
     this.#cache.updateBackfillJob(job.id, {
       pages_fetched: job.pages_fetched + 1,
@@ -139,15 +156,31 @@ export class XChatSync {
     const participantIds = JSON.parse(conversation.participant_ids_json)
     for (const participantId of participantIds) {
       if (this.#cache.hasSigningKeys(participantId) || this.#checkedSigningKeyUsers.has(participantId)) continue
-      const keys = await this.#api.getSigningKeys(participantId)
+      this.#report("signing_key_read_started")
+      let keys
+      try {
+        keys = await this.#api.getSigningKeys(participantId)
+      } catch (error) {
+        this.#report("signing_key_read_failed", { status: Number(error?.status ?? error?.response?.status) || null })
+        throw error
+      }
+      this.#report("signing_key_read_completed", { key_count: keys.length })
       this.#checkedSigningKeyUsers.add(participantId)
       if (keys.length > 0) this.#cache.addSigningKeys(keys)
     }
     const remainingEvents = Math.max(1, job.max_events - job.events_seen)
-    const page = await this.#api.listConversationEvents(conversation.conversation_id, {
-      paginationToken: conversation.event_cursor,
-      maxResults: Math.min(100, remainingEvents),
-    })
+    this.#report("conversation_event_read_started")
+    let page
+    try {
+      page = await this.#api.listConversationEvents(conversation.conversation_id, {
+        paginationToken: conversation.event_cursor,
+        maxResults: Math.min(100, remainingEvents),
+      })
+    } catch (error) {
+      this.#report("conversation_event_read_failed", { status: Number(error?.status ?? error?.response?.status) || null })
+      throw error
+    }
+    this.#report("conversation_event_read_completed", { event_count: page.events.length })
     const ingestion = this.#cache.ingestBackfill({
       conversation: {
         id: conversation.conversation_id,

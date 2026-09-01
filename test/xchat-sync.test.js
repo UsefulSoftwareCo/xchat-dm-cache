@@ -128,6 +128,8 @@ test("checkpoints rate limits and schedules a delayed retry", async () => {
 
   assert.equal(cache.getBackfillJob(job.id).status, "pending")
   assert.equal(cache.getBackfillJob(job.id).last_error, "X API rate limit reached; retry scheduled")
+  assert.equal(sync.diagnostics.event, "conversation_event_read_failed")
+  assert.equal(sync.diagnostics.status, 429)
   assert.equal(scheduled[0].delayMs, 1234)
 
   await scheduled.shift().callback()
