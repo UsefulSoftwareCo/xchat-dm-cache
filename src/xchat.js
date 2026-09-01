@@ -48,6 +48,7 @@ function valueFingerprint(value) {
 export class XChatDecryptor {
   #createChat
   #diagnostic
+  #lastDiagnostic = null
   #pin
   #session
   #fingerprint
@@ -62,6 +63,15 @@ export class XChatDecryptor {
 
   get configured() {
     return Boolean(this.#pin)
+  }
+
+  get diagnostics() {
+    return this.#lastDiagnostic
+  }
+
+  #report(event, fields) {
+    this.#lastDiagnostic = { event, ...fields, recorded_at: new Date().toISOString() }
+    this.#diagnostic(event, fields)
   }
 
   async decrypt(body) {
@@ -112,7 +122,7 @@ export class XChatDecryptor {
     const hydrateKeys = keyEvents.length > 0 && !this.#hydratedKeySets.has(keySetFingerprint)
     const includedKeyEvents = hydrateKeys ? keyEvents : []
     const startedAt = Date.now()
-    this.#diagnostic("decrypt_started", {
+    this.#report("decrypt_started", {
       key_event_count: includedKeyEvents.length,
       event_count: events.length,
     })
@@ -120,14 +130,14 @@ export class XChatDecryptor {
     try {
       result = session.decryptEvents([...includedKeyEvents, ...events])
     } catch (error) {
-      this.#diagnostic("decrypt_failed", {
+      this.#report("decrypt_failed", {
         key_event_count: includedKeyEvents.length,
         event_count: events.length,
         duration_ms: Date.now() - startedAt,
       })
       throw error
     }
-    this.#diagnostic("decrypt_completed", {
+    this.#report("decrypt_completed", {
       key_event_count: includedKeyEvents.length,
       event_count: events.length,
       duration_ms: Date.now() - startedAt,
@@ -158,7 +168,7 @@ export class XChatDecryptor {
     this.#signingKeysFingerprint = undefined
     this.#hydratedKeySets.clear()
     const unlockStartedAt = Date.now()
-    this.#diagnostic("session_unlock_started", {})
+    this.#report("session_unlock_started", {})
     this.#session = Promise.resolve(
       this.#createChat({
         juiceboxConfig: configJson,
@@ -168,10 +178,10 @@ export class XChatDecryptor {
       await chat.unlock(this.#pin)
       chat.setIdentity(userId, publicKeyVersion)
       chat.setCacheKeys(true)
-      this.#diagnostic("session_unlock_completed", { duration_ms: Date.now() - unlockStartedAt })
+      this.#report("session_unlock_completed", { duration_ms: Date.now() - unlockStartedAt })
       return chat
     }).catch((error) => {
-      this.#diagnostic("session_unlock_failed", { duration_ms: Date.now() - unlockStartedAt })
+      this.#report("session_unlock_failed", { duration_ms: Date.now() - unlockStartedAt })
       this.#session = undefined
       this.#fingerprint = undefined
       this.#signingKeysFingerprint = undefined

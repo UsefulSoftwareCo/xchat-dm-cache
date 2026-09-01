@@ -149,4 +149,8 @@ test("reports count-only decryption diagnostics", async () => {
   assert.equal(diagnostics.at(-1).event_count, 1)
   assert.equal(diagnostics.at(-1).error_count, 1)
   assert.equal(JSON.stringify(diagnostics).includes("secret"), false)
+  assert.equal(decryptor.diagnostics.event, "decrypt_completed")
+  assert.equal(decryptor.diagnostics.key_event_count, 1)
+  assert.equal(typeof decryptor.diagnostics.recorded_at, "string")
+  assert.equal(JSON.stringify(decryptor.diagnostics).includes("secret"), false)
 })
