@@ -99,3 +99,24 @@ test("leaves rate-limited backfills pending for a later retry", async () => {
   assert.equal((await sync.runJob(job.id)).status, "completed")
   cache.close()
 })
+
+test("pauses a pending backfill before its scheduled retry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "legacy-dm-pause-"))
+  const cache = await LegacyDmCache.open({ filePath: join(directory, "cache.sqlite"), encryptionSecret: "test-secret" })
+  let calls = 0
+  const api = {
+    configured: true,
+    getMe: async () => ({ id: "self" }),
+    listLegacyDmEventsByParticipant: async () => {
+      calls += 1
+      throw Object.assign(new Error("rate limited"), { status: 429, headers: new Headers({ "retry-after": "1" }) })
+    },
+  }
+  const sync = new LegacyDmSync({ api, cache })
+  const job = sync.createJob({ participant_ids: ["person"], max_events: 10, max_pages: 10 })
+  assert.equal((await sync.runJob(job.id)).status, "pending")
+  assert.equal(sync.pauseJob(job.id).status, "paused")
+  assert.equal((await sync.runJob(job.id)).status, "paused")
+  assert.equal(calls, 1)
+  cache.close()
+})

@@ -78,6 +78,17 @@ export class LegacyDmSync {
     return this.#cache.createBackfillJob(options)
   }
 
+  pauseJob(jobId) {
+    const job = this.#cache.getBackfillJob(jobId)
+    if (!job) {
+      const error = new Error("Legacy DM backfill job was not found")
+      error.status = 404
+      throw error
+    }
+    this.#retryDelays.delete(jobId)
+    return this.#cache.updateBackfillJob(jobId, { status: "paused", last_error: "Paused by operator" })
+  }
+
   runJob(jobId, { requestLimit = maximumRequestsPerSlice } = {}) {
     if (this.#runningJobs.has(jobId)) return this.#runningJobs.get(jobId)
     const promise = this.#runJob(jobId, requestLimit).finally(() => this.#runningJobs.delete(jobId))

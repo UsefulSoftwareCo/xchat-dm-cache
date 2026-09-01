@@ -269,6 +269,12 @@ export function createHandler({
         return json(response, 200, await legacyDmSync.runJob(decodeURIComponent(legacyBackfillMatch[1])))
       }
 
+      const legacyBackfillPauseMatch = url.pathname.match(/^\/x\/cache\/legacy\/backfill-jobs\/([^/]+)\/pause$/)
+      if (legacyBackfillPauseMatch && request.method === "POST") {
+        if (!legacyDmSync) return cacheUnavailable(response)
+        return json(response, 200, legacyDmSync.pauseJob(decodeURIComponent(legacyBackfillPauseMatch[1])))
+      }
+
       if (url.pathname === "/xchat/cache/backfill-jobs" && request.method === "POST") {
         if (!xchatCache || !xchatSync) return cacheUnavailable(response)
         const job = xchatSync.createJob(await readJson(request))
@@ -485,6 +491,14 @@ export function openApiDocument(publicBaseUrl) {
           summary: "Resume a durable legacy DM backfill job",
           parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
           responses: { "200": { description: "Current legacy DM backfill job state" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
+        },
+      },
+      "/x/cache/legacy/backfill-jobs/{job_id}/pause": {
+        post: {
+          operationId: "pauseLegacyDmBackfillJob",
+          summary: "Pause a durable legacy DM backfill job",
+          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Paused legacy DM backfill job" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
         },
       },
       "/xchat/decrypt-events": {
