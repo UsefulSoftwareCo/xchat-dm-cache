@@ -193,6 +193,18 @@ export class XChatCache {
         event_count INTEGER NOT NULL,
         duplicate_event_count INTEGER NOT NULL
       );
+      UPDATE xchat_decrypted_events
+      SET conversation_id = (
+        SELECT xchat_events.conversation_id
+        FROM xchat_events
+        WHERE xchat_events.event_uuid = xchat_decrypted_events.event_uuid
+      )
+      WHERE EXISTS (
+        SELECT 1
+        FROM xchat_events
+        WHERE xchat_events.event_uuid = xchat_decrypted_events.event_uuid
+          AND xchat_events.conversation_id != xchat_decrypted_events.conversation_id
+      );
     `)
   }
 
