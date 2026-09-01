@@ -85,6 +85,12 @@ function hasDecryptionErrors(result) {
   return Boolean(errors && typeof errors === "object" && Object.keys(errors).length > 0)
 }
 
+function retryIndividually(message) {
+  const error = new Error(message)
+  error.retryIndividually = true
+  return error
+}
+
 function encodeCursor(row) {
   return Buffer.from(JSON.stringify({ created_at: row.created_at, event_id: row.event_id })).toString("base64url")
 }
@@ -634,6 +640,7 @@ export class XChatCache {
             `).run(String(batchError?.message ?? batchError).slice(0, 500), batch[0].event_uuid)
             continue
           }
+          if (!batchError?.retryIndividually) throw batchError
           for (const row of batch) {
             try {
               await this.#processEvent(row)
@@ -674,10 +681,10 @@ export class XChatCache {
       key_events: keyEvents,
       events: rows.map((row) => row.encoded_event),
     })
-    if (hasDecryptionErrors(result)) throw new Error("Chat XDK returned decryption errors")
+    if (hasDecryptionErrors(result)) throw retryIndividually("Chat XDK returned decryption errors")
     const messages = Array.isArray(result?.messages) ? result.messages : []
     if (messages.some((value) => typeof value?.originalB64 !== "string")) {
-      throw new Error("Chat XDK batch output cannot be matched to its source event")
+      throw retryIndividually("Chat XDK batch output cannot be matched to its source event")
     }
     const rowsByCiphertext = new Map(rows.map((row) => [row.encoded_event, row]))
     const insertedAt = nowIso()

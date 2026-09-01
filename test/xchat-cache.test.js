@@ -145,6 +145,36 @@ test("falls back to isolated retries when a decryption batch has errors", async 
   cache.close()
 })
 
+test("does not fan out a batch infrastructure failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-batch-infrastructure-"))
+  let calls = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: {
+      decrypt: async () => {
+        calls += 1
+        const error = new Error("HTTP 429: Too Many Requests")
+        error.status = 429
+        throw error
+      },
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [
+      { event_uuid: "infra-1", encoded_event: "infra-ciphertext-1" },
+      { event_uuid: "infra-2", encoded_event: "infra-ciphertext-2" },
+    ],
+  })
+
+  await assert.rejects(() => cache.processPending(), /429/)
+  assert.equal(calls, 1)
+  assert.equal(cache.status().pending_events, 2)
+  cache.close()
+})
+
 test("persists key events and pending ciphertext across a restart", async () => {
   const { cache, filePath } = await cacheFixture()
   cache.ingestBackfill({
