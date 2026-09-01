@@ -6,6 +6,17 @@ const publicKeyFields = [
   "signing_public_key",
   "identity_public_key_signature",
 ]
+const identityFields = [...publicKeyFields, "juicebox_config"]
+
+function mapSigningKey(userId, key) {
+  return {
+    user_id: userId,
+    public_key_version: String(key.publicKeyVersion),
+    public_key: key.publicKey,
+    signing_public_key: key.signingPublicKey,
+    identity_public_key_signature: key.identityPublicKeySignature,
+  }
+}
 
 function apiError(response, operation) {
   const errors = Array.isArray(response?.errors) ? response.errors : []
@@ -159,12 +170,29 @@ export class XChatApi {
       apiError(value, `Get XChat signing keys for ${userId}`)
       return value
     })
-    return (response.data ?? []).map((key) => ({
-      user_id: userId,
-      public_key_version: String(key.publicKeyVersion),
-      public_key: key.publicKey,
-      signing_public_key: key.signingPublicKey,
-      identity_public_key_signature: key.identityPublicKeySignature,
-    }))
+    return (response.data ?? []).map((key) => mapSigningKey(userId, key))
+  }
+
+  async getIdentity(userId, publicKeyVersion) {
+    if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
+    const response = await this.#call(async (client) => {
+      const value = await client.users.getPublicKey(userId, { publicKeyFields: identityFields })
+      apiError(value, `Get XChat identity for ${userId}`)
+      return value
+    })
+    const keys = response.data ?? []
+    const key = keys.find((value) => String(value.publicKeyVersion) === String(publicKeyVersion))
+    if (!key) throw new Error("The current XChat public key version was not returned by X")
+    if (!key.juiceboxConfig || typeof key.juiceboxConfig !== "object") {
+      throw new Error("The current XChat identity has no Juicebox configuration")
+    }
+    return {
+      identity: {
+        user_id: userId,
+        public_key_version: String(key.publicKeyVersion),
+        juicebox_config: key.juiceboxConfig,
+      },
+      signing_keys: keys.map((value) => mapSigningKey(userId, value)),
+    }
   }
 }

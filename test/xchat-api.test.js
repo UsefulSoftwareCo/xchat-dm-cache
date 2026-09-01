@@ -87,3 +87,41 @@ test("refreshes an expired OAuth token and persists the rotated token", async ()
   assert.equal(stored[0].access_token, "fresh")
   assert.equal(stored[0].refresh_token, "refresh-2")
 })
+
+test("refreshes the current Juicebox identity through the official public-key endpoint", async () => {
+  let requestedFields
+  const api = new XChatApi({
+    client: {
+      users: {
+        getPublicKey: async (_userId, options) => {
+          requestedFields = options.publicKeyFields
+          return {
+            data: [{
+              publicKeyVersion: "7",
+              publicKey: "identity",
+              signingPublicKey: "signing",
+              identityPublicKeySignature: "signature",
+              juiceboxConfig: { token_map: [] },
+            }],
+          }
+        },
+      },
+    },
+  })
+
+  assert.deepEqual(await api.getIdentity("self", "7"), {
+    identity: {
+      user_id: "self",
+      public_key_version: "7",
+      juicebox_config: { token_map: [] },
+    },
+    signing_keys: [{
+      user_id: "self",
+      public_key_version: "7",
+      public_key: "identity",
+      signing_public_key: "signing",
+      identity_public_key_signature: "signature",
+    }],
+  })
+  assert.equal(requestedFields.includes("juicebox_config"), true)
+})

@@ -58,6 +58,7 @@ function diagnosticError(error) {
 export class XChatDecryptor {
   #createChat
   #diagnostic
+  #refreshIdentity
   #lastDiagnostic = null
   #pin
   #session
@@ -65,10 +66,11 @@ export class XChatDecryptor {
   #signingKeysFingerprint
   #hydratedKeySets = new Set()
 
-  constructor({ createChat, pin, diagnostic = () => {} }) {
+  constructor({ createChat, pin, diagnostic = () => {}, refreshIdentity }) {
     this.#createChat = createChat
     this.#pin = pin
     this.#diagnostic = diagnostic
+    this.#refreshIdentity = refreshIdentity
   }
 
   get configured() {
@@ -121,7 +123,29 @@ export class XChatDecryptor {
       `${left.userId}\0${left.publicKeyVersion}`.localeCompare(`${right.userId}\0${right.publicKeyVersion}`),
     )
 
-    const session = await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
+    let session
+    try {
+      session = await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
+    } catch (error) {
+      if (!this.#refreshIdentity || !/InvalidAuth/i.test(String(error?.message ?? error))) throw error
+      this.#report("identity_refresh_started", {})
+      let refreshedIdentity
+      try {
+        refreshedIdentity = await this.#refreshIdentity({ userId, publicKeyVersion })
+      } catch (refreshError) {
+        this.#report("identity_refresh_failed", diagnosticError(refreshError))
+        throw refreshError
+      }
+      this.#report("identity_refresh_completed", {})
+      session = await this.#getSession({
+        userId: requiredString(refreshedIdentity?.user_id, "refreshed identity.user_id"),
+        publicKeyVersion: requiredString(
+          refreshedIdentity?.public_key_version,
+          "refreshed identity.public_key_version",
+        ),
+        juiceboxConfig: refreshedIdentity?.juicebox_config,
+      })
+    }
     const signingKeysFingerprint = valueFingerprint(signingKeys)
     if (this.#signingKeysFingerprint !== signingKeysFingerprint) {
       session.setSigningKeys(signingKeys)

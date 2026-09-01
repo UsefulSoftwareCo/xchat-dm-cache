@@ -180,3 +180,53 @@ test("redacts credentials and URLs from failure diagnostics", async () => {
   assert.equal(decryptor.diagnostics.event, "session_unlock_failed")
   assert.equal(decryptor.diagnostics.error_message, "request [url] failed for [redacted]")
 })
+
+test("refreshes an expired official Juicebox identity once", async () => {
+  const createdConfigs = []
+  const refreshes = []
+  const decryptor = new XChatDecryptor({
+    pin: "safe-pin",
+    refreshIdentity: async (identity) => {
+      refreshes.push(identity)
+      return {
+        user_id: identity.userId,
+        public_key_version: identity.publicKeyVersion,
+        juicebox_config: { token_map: [{ key: "realm", value: { token: "fresh" } }] },
+      }
+    },
+    createChat: async ({ juiceboxConfig }) => {
+      createdConfigs.push(JSON.parse(juiceboxConfig))
+      const fresh = juiceboxConfig.includes("fresh")
+      return {
+        unlock: async () => {
+          if (!fresh) throw new Error("Juicebox recovery failed: reason=InvalidAuth")
+        },
+        setIdentity: () => {},
+        setCacheKeys: () => {},
+        setSigningKeys: () => {},
+        decryptEvents: () => ({ messages: [], errors: {} }),
+      }
+    },
+  })
+
+  const result = await decryptor.decrypt({
+    identity: {
+      user_id: "10",
+      public_key_version: "20",
+      juicebox_config: { token_map: [{ key: "realm", value: { token: "expired" } }] },
+    },
+    signing_keys: [{
+      user_id: "10",
+      public_key_version: "20",
+      public_key: "identity-key",
+      signing_public_key: "signing-key",
+      identity_public_key_signature: "signature",
+    }],
+    events: ["event"],
+  })
+
+  assert.deepEqual(result, { messages: [], errors: {} })
+  assert.deepEqual(refreshes, [{ userId: "10", publicKeyVersion: "20" }])
+  assert.equal(createdConfigs.length, 2)
+  assert.equal(createdConfigs[1].token_map[0].value.token, "fresh")
+})
