@@ -89,7 +89,7 @@ test("leaves rate-limited backfills pending for a later retry", async () => {
     getMe: async () => ({ id: "self" }),
     listLegacyDmEventsByParticipant: async () => {
       calls += 1
-      if (calls === 1) throw Object.assign(new Error("rate limited"), { status: 429, response: { headers: { "retry-after": "1" } } })
+      if (calls === 1) throw Object.assign(new Error("rate limited"), { status: 429, headers: new Headers({ "retry-after": "1" }) })
       return { events: [], users: [], next_token: null }
     },
   }

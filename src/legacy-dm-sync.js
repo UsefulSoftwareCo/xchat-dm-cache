@@ -7,7 +7,7 @@ function statusOf(error) {
 }
 
 function retryDelayMs(error) {
-  const headers = error?.response?.headers
+  const headers = error?.headers ?? error?.response?.headers
   const retryAfter = Number(headers?.get?.("retry-after") ?? headers?.["retry-after"])
   if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(retryAfter * 1000, 15 * 60 * 1000)
   const resetAt = Number(headers?.get?.("x-rate-limit-reset") ?? headers?.["x-rate-limit-reset"])
