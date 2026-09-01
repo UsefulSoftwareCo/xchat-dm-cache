@@ -10,6 +10,24 @@ function retryDelay(error, fallbackDelayMs, now) {
   return Math.max(1000, resetAtMs - now() + 1000)
 }
 
+function rateLimitDiagnostics(error) {
+  const headers = error?.headers ?? error?.response?.headers
+  const readHeader = (name) => headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.replaceAll("-", "_")]
+  const resetAtMs = Number(readHeader("x-rate-limit-reset")) * 1000
+  return {
+    rate_limit: Number(readHeader("x-rate-limit-limit")) || null,
+    rate_limit_remaining: Number(readHeader("x-rate-limit-remaining")) || 0,
+    rate_limit_reset_at: Number.isFinite(resetAtMs) && resetAtMs > 0
+      ? new Date(resetAtMs).toISOString()
+      : null,
+    error_type: typeof error?.data?.type === "string"
+      ? error.data.type.slice(0, 200)
+      : typeof error?.data?.title === "string"
+        ? error.data.title.slice(0, 200)
+        : null,
+  }
+}
+
 export class XChatPendingProcessor {
   #cache
   #lastDiagnostic = null
@@ -57,9 +75,16 @@ export class XChatPendingProcessor {
       this.#timer = null
       void this.#run()
     }, delayMs) ?? true
-    this.#report(delayMs > 0 ? "retry_scheduled" : "processing_scheduled", {
-      retry_at: delayMs > 0 ? new Date(this.#now() + delayMs).toISOString() : null,
-    })
+    if (delayMs > 0) {
+      this.#lastDiagnostic = {
+        ...this.#lastDiagnostic,
+        event: "retry_scheduled",
+        retry_at: new Date(this.#now() + delayMs).toISOString(),
+        recorded_at: new Date(this.#now()).toISOString(),
+      }
+    } else {
+      this.#report("processing_scheduled", { retry_at: null })
+    }
   }
 
   async #run() {
@@ -82,6 +107,7 @@ export class XChatPendingProcessor {
       this.#report("processing_failed", {
         status: Number(error?.status ?? error?.response?.status) || null,
         retry_at: new Date(this.#retryNotBefore).toISOString(),
+        ...rateLimitDiagnostics(error),
       })
     } finally {
       this.#running = null

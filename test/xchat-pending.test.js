@@ -13,6 +13,12 @@ test("coalesces requests and retries pending processing after a rate limit", asy
         if (calls === 1) {
           const error = new Error("rate limited")
           error.status = 429
+          error.headers = new Headers({
+            "x-rate-limit-limit": "5",
+            "x-rate-limit-remaining": "0",
+            "x-rate-limit-reset": String((now + 900_000) / 1000),
+          })
+          error.data = { type: "https://api.x.com/problems/usage-capped" }
           throw error
         }
         return { selected: 2, processed: 2, failed: 0 }
@@ -35,12 +41,16 @@ test("coalesces requests and retries pending processing after a rate limit", asy
   await new Promise(setImmediate)
   assert.equal(calls, 1)
   assert.equal(scheduled.length, 1)
-  assert.equal(scheduled[0].delayMs, 900_000)
+  assert.equal(scheduled[0].delayMs, 901_000)
   assert.equal(processor.diagnostics.event, "retry_scheduled")
+  assert.equal(processor.diagnostics.rate_limit, 5)
+  assert.equal(processor.diagnostics.rate_limit_remaining, 0)
+  assert.equal(processor.diagnostics.rate_limit_reset_at, "2023-11-14T22:28:20.000Z")
+  assert.equal(processor.diagnostics.error_type, "https://api.x.com/problems/usage-capped")
 
   processor.request()
   assert.equal(scheduled.length, 1)
-  now += 900_000
+  now += 901_000
   scheduled.shift().callback()
   await new Promise(setImmediate)
 
