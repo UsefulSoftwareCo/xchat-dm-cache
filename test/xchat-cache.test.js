@@ -102,6 +102,9 @@ test("deduplicates backfill events and encrypts private values at rest", async (
     distinct_senders: 1,
     senders_without_keys: 0,
     missing_signing_key_user_ids: [],
+    distinct_participants: 2,
+    participants_without_keys: 1,
+    missing_participant_key_user_ids: ["self"],
     decrypted_events: 1,
     messages: 1,
     webhook_deliveries: 0,
@@ -706,6 +709,23 @@ test("lists missing signing-key users with a stable private cursor", async () =>
   const second = cache.listMissingSigningKeyUsers({ limit: 1, after: first.meta.next_after })
   assert.deepEqual(first.data, [{ user_id: "missing-a" }])
   assert.deepEqual(second.data, [{ user_id: "missing-b" }])
+  cache.close()
+})
+
+test("lists conversation participants before their events arrive", async () => {
+  const { cache } = await cacheFixture()
+  cache.configure({
+    identity,
+    signing_keys: [signingKey],
+    conversations: [{ id: "conversation-2", participant_ids: ["sender", "future-b", "future-a"] }],
+  })
+
+  const first = cache.listMissingParticipantKeyUsers({ limit: 1 })
+  const second = cache.listMissingParticipantKeyUsers({ limit: 1, after: first.meta.next_after })
+  assert.deepEqual(first.data, [{ user_id: "future-a" }])
+  assert.deepEqual(second.data, [{ user_id: "future-b" }])
+  assert.equal(cache.status().distinct_participants, 3)
+  assert.equal(cache.status().participants_without_keys, 2)
   cache.close()
 })
 

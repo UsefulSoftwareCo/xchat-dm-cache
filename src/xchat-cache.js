@@ -466,6 +466,27 @@ export class XChatCache {
     }
   }
 
+  listMissingParticipantKeyUsers({ limit = 100, after } = {}) {
+    const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
+    const rows = this.#db.prepare(`
+      SELECT DISTINCT CAST(participant.value AS TEXT) AS user_id
+      FROM xchat_conversations c
+      JOIN json_each(c.participant_ids_json) participant
+      WHERE participant.type = 'text'
+        AND CAST(participant.value AS TEXT) > ?
+        AND NOT EXISTS (
+          SELECT 1 FROM xchat_signing_keys k
+          WHERE k.user_id = CAST(participant.value AS TEXT)
+        )
+      ORDER BY user_id ASC
+      LIMIT ?
+    `).all(typeof after === "string" ? after : "", boundedLimit)
+    return {
+      data: rows.map(({ user_id: userId }) => ({ user_id: userId })),
+      meta: { next_after: rows.length === boundedLimit ? rows.at(-1).user_id : null },
+    }
+  }
+
   #upsertSigningKeys(signingKeys, updatedAt) {
     const statement = this.#db.prepare(`
       INSERT INTO xchat_signing_keys (
@@ -1100,6 +1121,22 @@ export class XChatCache {
       WHERE e.sender_id IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM xchat_signing_keys k WHERE k.user_id = e.sender_id)
     `).get().count
+    const distinctParticipants = this.#db.prepare(`
+      SELECT COUNT(DISTINCT CAST(participant.value AS TEXT)) AS count
+      FROM xchat_conversations c
+      JOIN json_each(c.participant_ids_json) participant
+      WHERE participant.type = 'text'
+    `).get().count
+    const participantsWithoutKeys = this.#db.prepare(`
+      SELECT COUNT(DISTINCT CAST(participant.value AS TEXT)) AS count
+      FROM xchat_conversations c
+      JOIN json_each(c.participant_ids_json) participant
+      WHERE participant.type = 'text'
+        AND NOT EXISTS (
+          SELECT 1 FROM xchat_signing_keys k
+          WHERE k.user_id = CAST(participant.value AS TEXT)
+        )
+    `).get().count
     return {
       configured: Boolean(this.#identityOrNull()),
       signing_keys: count("xchat_signing_keys"),
@@ -1111,6 +1148,9 @@ export class XChatCache {
       distinct_senders: distinctSenders,
       senders_without_keys: sendersWithoutKeys,
       missing_signing_key_user_ids: this.listMissingSigningKeyUsers({ limit: 1000 }).data.map(({ user_id: userId }) => userId),
+      distinct_participants: distinctParticipants,
+      participants_without_keys: participantsWithoutKeys,
+      missing_participant_key_user_ids: this.listMissingParticipantKeyUsers({ limit: 1000 }).data.map(({ user_id: userId }) => userId),
       decrypted_events: count("xchat_decrypted_events"),
       messages: count("xchat_decrypted_events", "WHERE event_type = 'message'"),
       webhook_deliveries: count("xchat_webhook_deliveries"),
