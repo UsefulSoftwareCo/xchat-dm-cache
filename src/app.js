@@ -35,7 +35,7 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"))
 }
 
-export function createHandler({ store, apiKey, publicBaseUrl }) {
+export function createHandler({ store, apiKey, publicBaseUrl, xchat }) {
   if (!apiKey) throw new Error("STATE_API_KEY is required")
 
   return async function handler(request, response) {
@@ -43,7 +43,7 @@ export function createHandler({ store, apiKey, publicBaseUrl }) {
       const url = new URL(request.url, "http://localhost")
 
       if (request.method === "GET" && url.pathname === "/health") {
-        return json(response, 200, { ok: true })
+        return json(response, 200, { ok: true, xchat_configured: xchat?.configured ?? false })
       }
 
       if (request.method === "GET" && url.pathname === "/openapi.json") {
@@ -53,6 +53,12 @@ export function createHandler({ store, apiKey, publicBaseUrl }) {
       if (!isAuthorized(request, apiKey)) {
         response.setHeader("www-authenticate", "Bearer")
         return json(response, 401, { error: "Unauthorized" })
+      }
+
+      if (request.method === "POST" && url.pathname === "/xchat/decrypt-events") {
+        if (!xchat) return json(response, 503, { error: "XChat is not available" })
+        const body = await readJson(request)
+        return json(response, 200, await xchat.decrypt(body))
       }
 
       const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent)
@@ -126,6 +132,57 @@ export function openApiDocument(publicBaseUrl) {
     },
     security: [{ bearerAuth: [] }],
     paths: {
+      "/xchat/decrypt-events": {
+        post: {
+          operationId: "decryptXChatEvents",
+          summary: "Decrypt an XChat event batch with the configured Juicebox identity",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["identity", "signing_keys", "events"],
+                  properties: {
+                    identity: {
+                      type: "object",
+                      required: ["user_id", "public_key_version", "juicebox_config"],
+                      properties: {
+                        user_id: { type: "string" },
+                        public_key_version: { type: "string" },
+                        juicebox_config: { type: "object", additionalProperties: true },
+                      },
+                    },
+                    signing_keys: {
+                      type: "array",
+                      minItems: 1,
+                      items: {
+                        type: "object",
+                        required: ["user_id", "public_key_version", "public_key", "signing_public_key", "identity_public_key_signature"],
+                        properties: {
+                          user_id: { type: "string" },
+                          public_key_version: { type: "string" },
+                          public_key: { type: "string" },
+                          signing_public_key: { type: "string" },
+                          identity_public_key_signature: { type: "string" },
+                        },
+                      },
+                    },
+                    key_events: { type: "array", items: { type: "string" }, default: [] },
+                    events: { type: "array", items: { type: "string" } },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Decrypted XChat messages and per-event errors", content: { "application/json": { schema: {} } } },
+            "400": { description: "Invalid event batch" },
+            "401": errorResponses["401"],
+            "503": { description: "XChat PIN is not configured" },
+          },
+        },
+      },
       "/state/{namespace}": {
         get: {
           operationId: "listStateKeys",

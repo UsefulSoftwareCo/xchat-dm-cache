@@ -1,6 +1,6 @@
 {
   "name": "executor-state-handler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,5 +9,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@xdevplatform/chat-xdk": "0.5.0",
+    "juicebox-sdk": "0.3.7"
   }
 }
