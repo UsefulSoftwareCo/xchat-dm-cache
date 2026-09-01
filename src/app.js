@@ -44,7 +44,7 @@ function cacheUnavailable(response) {
   return json(response, 503, { error: "XChat cache is not available" })
 }
 
-export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache, webhookSecret }) {
+export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache, xchatSync, webhookSecret }) {
   if (!apiKey) throw new Error("STATE_API_KEY is required")
 
   return async function handler(request, response) {
@@ -55,7 +55,7 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
         return json(response, 200, {
           ok: true,
           xchat_configured: xchat?.configured ?? false,
-          xchat_cache: xchatCache?.status() ?? null,
+          xchat_cache_ready: Boolean(xchatCache),
           xchat_webhook_configured: Boolean(webhookSecret),
         })
       }
@@ -151,6 +151,31 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
       if (url.pathname === "/xchat/cache/status" && request.method === "GET") {
         if (!xchatCache) return cacheUnavailable(response)
         return json(response, 200, xchatCache.status())
+      }
+
+      if (url.pathname === "/xchat/cache/backfill-jobs" && request.method === "POST") {
+        if (!xchatCache || !xchatSync) return cacheUnavailable(response)
+        const job = xchatSync.createJob(await readJson(request))
+        xchatSync.schedule(job.id)
+        return json(response, 202, job)
+      }
+
+      if (url.pathname === "/xchat/cache/backfill-jobs" && request.method === "GET") {
+        if (!xchatCache) return cacheUnavailable(response)
+        return json(response, 200, xchatCache.listBackfillJobs({ limit: url.searchParams.get("limit") }))
+      }
+
+      const backfillJobMatch = url.pathname.match(/^\/xchat\/cache\/backfill-jobs\/([^/]+)$/)
+      if (backfillJobMatch && request.method === "GET") {
+        if (!xchatCache) return cacheUnavailable(response)
+        const job = xchatCache.getBackfillJob(decodeURIComponent(backfillJobMatch[1]))
+        return job ? json(response, 200, job) : json(response, 404, { error: "XChat backfill job was not found" })
+      }
+
+      if (backfillJobMatch && request.method === "POST") {
+        if (!xchatSync) return cacheUnavailable(response)
+        const job = await xchatSync.runJob(decodeURIComponent(backfillJobMatch[1]))
+        return json(response, 200, job)
       }
 
       const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent)
@@ -406,6 +431,41 @@ export function openApiDocument(publicBaseUrl) {
           operationId: "getXChatCacheStatus",
           summary: "Get private XChat cache counts and readiness",
           responses: { "200": { description: "Cache status", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/backfill-jobs": {
+        post: {
+          operationId: "createXChatBackfillJob",
+          summary: "Create a resumable bounded XChat archive backfill",
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["max_events", "max_pages"],
+            properties: {
+              max_events: { type: "integer", minimum: 1, description: "Hard event-read limit for this job" },
+              max_pages: { type: "integer", minimum: 1, description: "Hard API page limit for this job" },
+            },
+          } } } },
+          responses: { "202": { description: "Durable backfill job created" }, "400": { description: "Invalid limits" }, "401": errorResponses["401"], "503": { description: "X OAuth is not configured" } },
+        },
+        get: {
+          operationId: "listXChatBackfillJobs",
+          summary: "List durable XChat archive backfill jobs",
+          parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } }],
+          responses: { "200": { description: "Backfill jobs" }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/backfill-jobs/{job_id}": {
+        get: {
+          operationId: "getXChatBackfillJob",
+          summary: "Get a durable XChat archive backfill job",
+          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Backfill job" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
+        },
+        post: {
+          operationId: "runXChatBackfillJob",
+          summary: "Resume one durable XChat archive backfill job",
+          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Current backfill job state" }, "401": errorResponses["401"], "404": { description: "Backfill job not found" } },
         },
       },
       "/state/{namespace}": {

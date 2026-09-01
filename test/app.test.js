@@ -16,6 +16,8 @@ let server
 let baseUrl
 const acceptedWebhooks = []
 let processCount = 0
+const backfillJob = { id: "00000000-0000-4000-8000-000000000001", status: "pending" }
+const scheduledJobs = []
 
 before(async () => {
   server = createServer(createHandler({
@@ -34,6 +36,13 @@ before(async () => {
         return { accepted: true, inserted: 1, duplicates: 0 }
       },
       processPending: async () => { processCount += 1 },
+      listBackfillJobs: () => ({ data: [backfillJob] }),
+      getBackfillJob: (id) => id === backfillJob.id ? backfillJob : null,
+    },
+    xchatSync: {
+      createJob: () => backfillJob,
+      schedule: (id) => scheduledJobs.push(id),
+      runJob: async () => ({ ...backfillJob, status: "completed" }),
     },
   }))
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
@@ -45,6 +54,17 @@ after(() => new Promise((resolve) => server.close(resolve)))
 test("rejects unauthenticated state access", async () => {
   const response = await fetch(`${baseUrl}/state/test/key`)
   assert.equal(response.status, 401)
+})
+
+test("does not expose private XChat counts through public health", async () => {
+  const response = await fetch(`${baseUrl}/health`)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    xchat_configured: true,
+    xchat_cache_ready: true,
+    xchat_webhook_configured: true,
+  })
 })
 
 test("writes, reads, lists, and deletes JSON state", async () => {
@@ -71,6 +91,7 @@ test("publishes a valid OpenAPI document", async () => {
   assert.equal(document.paths["/xchat/decrypt-events"].post.operationId, "decryptXChatEvents")
   assert.equal(document.paths["/xchat/cache/messages"].get.operationId, "listCachedXChatMessages")
   assert.equal(document.paths["/xchat/cache/events"].get.operationId, "listCachedXChatEvents")
+  assert.equal(document.paths["/xchat/cache/backfill-jobs"].post.operationId, "createXChatBackfillJob")
 })
 
 test("answers X webhook CRC challenges", async () => {
@@ -113,4 +134,20 @@ test("passes authenticated XChat event batches to the decryptor", async () => {
   })
   assert.equal(response.status, 200)
   assert.deepEqual(await response.json(), { messages: [{ event: "ciphertext" }] })
+})
+
+test("creates and inspects bounded XChat backfill jobs", async () => {
+  const headers = { authorization: "Bearer test-secret", "content-type": "application/json" }
+  const created = await fetch(`${baseUrl}/xchat/cache/backfill-jobs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ max_events: 100, max_pages: 10 }),
+  })
+  assert.equal(created.status, 202)
+  assert.deepEqual(await created.json(), backfillJob)
+  assert.deepEqual(scheduledJobs, [backfillJob.id])
+
+  const read = await fetch(`${baseUrl}/xchat/cache/backfill-jobs/${backfillJob.id}`, { headers })
+  assert.equal(read.status, 200)
+  assert.deepEqual(await read.json(), backfillJob)
 })

@@ -116,6 +116,44 @@ test("persists key events and pending ciphertext across a restart", async () => 
   reopened.close()
 })
 
+test("rekeys every encrypted cache row atomically", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-rekey-"))
+  const filePath = join(directory, "cache.sqlite")
+  const original = await XChatCache.open({
+    filePath,
+    decryptor: decryptor([]),
+    encryptionSecret: "old-cache-key",
+  })
+  original.configure({ identity, signing_keys: [signingKey] })
+  original.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [{ event_uuid: "rekey-event", encoded_event: "rekey-ciphertext" }],
+  })
+  await original.processPending()
+  original.close()
+
+  const migrated = await XChatCache.open({
+    filePath,
+    decryptor: decryptor([]),
+    encryptionSecret: "new-cache-key",
+    previousEncryptionSecret: "old-cache-key",
+  })
+  assert.equal(migrated.listMessages().data[0].event.content.text, "private message body")
+  migrated.close()
+
+  await assert.rejects(
+    XChatCache.open({ filePath, decryptor: decryptor([]), encryptionSecret: "old-cache-key" }),
+    /cannot decrypt the existing cache/,
+  )
+  const reopened = await XChatCache.open({
+    filePath,
+    decryptor: decryptor([]),
+    encryptionSecret: "new-cache-key",
+  })
+  assert.equal(reopened.status().messages, 1)
+  reopened.close()
+})
+
 test("deduplicates live webhook deliveries and message events", async () => {
   const { cache } = await cacheFixture()
   const body = {
@@ -136,6 +174,104 @@ test("deduplicates live webhook deliveries and message events", async () => {
   assert.deepEqual(await cache.processPending(), { selected: 1, processed: 1, failed: 0 })
   assert.equal(cache.status().webhook_deliveries, 1)
   assert.equal(cache.status().messages, 1)
+  cache.close()
+})
+
+test("preserves conversation metadata when a webhook only supplies an id", async () => {
+  const { cache } = await cacheFixture()
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1", type: "direct", participant_ids: ["self", "sender"] },
+    events: [],
+  })
+  cache.acceptWebhook({
+    data: {
+      event_type: "chat.received",
+      event_uuid: "metadata-event",
+      payload: { conversation_id: "conversation-1", sender_id: "sender", encoded_event: "ciphertext" },
+    },
+  })
+
+  const [conversation] = cache.listConversations().data
+  assert.equal(conversation.type, "direct")
+  assert.deepEqual(conversation.participant_ids, ["self", "sender"])
+  cache.close()
+})
+
+test("uses a stable tuple cursor when events have the same timestamp", async () => {
+  const { cache } = await cacheFixture()
+  const createdAt = "2024-01-01T00:00:00.000Z"
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: ["a", "b", "c"].map((id) => ({ event_uuid: id, encoded_event: id, created_at: createdAt })),
+  })
+  await cache.processPending()
+
+  const first = cache.listMessages({ limit: 2 })
+  const second = cache.listMessages({ limit: 2, before: first.meta.next_before })
+  assert.equal(first.data.length, 2)
+  assert.equal(second.data.length, 1)
+  assert.notEqual(first.meta.next_before, createdAt)
+  cache.close()
+})
+
+test("drains events inserted while processing is active", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-drain-"))
+  let releaseFirst
+  let firstStarted
+  const gate = new Promise((resolve) => { releaseFirst = resolve })
+  const started = new Promise((resolve) => { firstStarted = resolve })
+  let calls = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: {
+      decrypt: async (body) => {
+        calls += 1
+        if (calls === 1) {
+          firstStarted()
+          await gate
+        }
+        return decryptor([]).decrypt(body)
+      },
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({ conversation: { id: "conversation-1" }, events: [{ event_uuid: "first", encoded_event: "first" }] })
+  const firstDrain = cache.processPending()
+  await started
+  cache.ingestBackfill({ conversation: { id: "conversation-1" }, events: [{ event_uuid: "second", encoded_event: "second" }] })
+  const secondDrain = cache.processPending()
+  releaseFirst()
+  await Promise.all([firstDrain, secondDrain])
+
+  assert.equal(calls, 2)
+  assert.equal(cache.status().pending_events, 0)
+  assert.equal(cache.status().messages, 2)
+  cache.close()
+})
+
+test("replays conversation key events in ingestion order", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-order-"))
+  let observedKeyEvents
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: {
+      decrypt: async (body) => {
+        observedKeyEvents = body.key_events
+        return decryptor([]).decrypt(body)
+      },
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    key_events: ["first", "second"],
+    events: [{ event_uuid: "ordered", encoded_event: "ordered" }],
+  })
+  await cache.processPending()
+
+  assert.deepEqual(observedKeyEvents, ["first", "second"])
   cache.close()
 })
 
@@ -192,5 +328,36 @@ test("retries failed events after signing keys are updated", async () => {
   shouldFail = false
   cache.addSigningKeys([{ ...signingKey, signing_public_key: "new-signing-public-key" }])
   assert.deepEqual(await cache.processPending(), { selected: 1, processed: 1, failed: 0 })
+  cache.close()
+})
+
+test("refreshes a sender signing key once before failing decryption", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-refresh-"))
+  const refreshedUsers = []
+  let attempts = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    signingKeyProvider: async (userId) => {
+      refreshedUsers.push(userId)
+      return [{ ...signingKey, signing_public_key: "refreshed-signing-key" }]
+    },
+    decryptor: {
+      decrypt: async (body) => {
+        attempts += 1
+        if (attempts === 1) return { messages: [], errors: [{ detail: "unknown signing key" }] }
+        return decryptor([]).decrypt(body)
+      },
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [{ event_uuid: "refresh-event", sender_id: "sender", encoded_event: "refresh-ciphertext" }],
+  })
+
+  assert.deepEqual(await cache.processPending(), { selected: 1, processed: 1, failed: 0 })
+  assert.deepEqual(refreshedUsers, ["sender"])
+  assert.equal(attempts, 2)
   cache.close()
 })

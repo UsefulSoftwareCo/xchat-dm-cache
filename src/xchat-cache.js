@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto"
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto"
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -26,11 +26,14 @@ function seal(value, key) {
   const nonce = randomBytes(12)
   const cipher = createCipheriv("aes-256-gcm", key, nonce)
   const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()])
-  return [nonce, cipher.getAuthTag(), encrypted].map((part) => part.toString("base64url")).join(".")
+  return ["v1", nonce, cipher.getAuthTag(), encrypted].map((part) => Buffer.isBuffer(part) ? part.toString("base64url") : part).join(".")
 }
 
 function open(sealed, key) {
-  const [nonce, tag, encrypted] = sealed.split(".").map((part) => Buffer.from(part, "base64url"))
+  const parts = sealed.split(".")
+  if (parts[0] === "v1") parts.shift()
+  if (parts.length !== 3) throw new Error("Unsupported XChat cache ciphertext version")
+  const [nonce, tag, encrypted] = parts.map((part) => Buffer.from(part, "base64url"))
   const decipher = createDecipheriv("aes-256-gcm", key, nonce)
   decipher.setAuthTag(tag)
   return JSON.parse(Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8"))
@@ -70,6 +73,19 @@ function messageId(event, originalB64) {
     : hash(originalB64 ?? JSON.stringify(event))
 }
 
+function encodeCursor(row) {
+  return Buffer.from(JSON.stringify({ created_at: row.created_at, event_id: row.event_id })).toString("base64url")
+}
+
+function decodeCursor(value) {
+  if (typeof value !== "string" || value.length === 0) return null
+  try {
+    const cursor = JSON.parse(Buffer.from(value, "base64url").toString("utf8"))
+    if (typeof cursor?.created_at === "string" && typeof cursor?.event_id === "string") return cursor
+  } catch {}
+  return { created_at: value, event_id: null }
+}
+
 export function webhookCrcResponse(crcToken, secret) {
   requiredString(crcToken, "crc_token")
   requiredString(secret, "X_WEBHOOK_CONSUMER_SECRET")
@@ -87,25 +103,53 @@ export function verifyWebhookSignature(rawBody, signature, secret) {
 export class XChatCache {
   #db
   #decryptor
+  #signingKeyProvider
   #key
   #processing = null
+  #processRequested = false
 
-  static async open({ filePath, decryptor, encryptionSecret }) {
+  static async open({ filePath, decryptor, encryptionSecret, previousEncryptionSecret, signingKeyProvider }) {
     requiredString(filePath, "XCHAT_CACHE_FILE")
-    requiredString(encryptionSecret, "STATE_API_KEY")
+    requiredString(encryptionSecret, "XCHAT_CACHE_ENCRYPTION_KEY")
     await mkdir(dirname(filePath), { recursive: true })
-    return new XChatCache({ database: new DatabaseSync(filePath), decryptor, encryptionSecret })
+    const database = new DatabaseSync(filePath)
+    try {
+      return new XChatCache({ database, decryptor, encryptionSecret, previousEncryptionSecret, signingKeyProvider })
+    } catch (error) {
+      database.close()
+      throw error
+    }
   }
 
-  constructor({ database, decryptor, encryptionSecret }) {
+  constructor({ database, decryptor, encryptionSecret, previousEncryptionSecret, signingKeyProvider }) {
     this.#db = database
     this.#decryptor = decryptor
+    this.#signingKeyProvider = signingKeyProvider
     this.#key = encryptionKey(encryptionSecret)
+    this.#prepareEncryption(previousEncryptionSecret)
     this.#migrate()
+    this.#ensureEncryptionMarker()
   }
 
   close() {
     this.#db.close()
+  }
+
+  setSigningKeyProvider(provider) {
+    this.#signingKeyProvider = provider
+  }
+
+  getEncryptedConfig(key) {
+    const row = this.#db.prepare("SELECT value_encrypted FROM xchat_cache_config WHERE key = ?").get(key)
+    return row ? open(row.value_encrypted, this.#key) : null
+  }
+
+  setEncryptedConfig(key, value) {
+    this.#db.prepare(`
+      INSERT INTO xchat_cache_config (key, value_encrypted, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value_encrypted = excluded.value_encrypted, updated_at = excluded.updated_at
+    `).run(requiredString(key, "config key"), seal(value, this.#key), nowIso())
   }
 
   #transaction(action) {
@@ -118,6 +162,83 @@ export class XChatCache {
       this.#db.exec("ROLLBACK")
       throw error
     }
+  }
+
+  #prepareEncryption(previousEncryptionSecret) {
+    const hasConfigTable = this.#db.prepare(`
+      SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'xchat_cache_config'
+    `).get()
+    if (!hasConfigTable) return
+    const marker = this.#db.prepare("SELECT value_encrypted FROM xchat_cache_config WHERE key = 'encryption_marker'").get()
+    if (marker) {
+      try {
+        if (open(marker.value_encrypted, this.#key) === "xchat-cache-v1") return
+      } catch {}
+      if (!previousEncryptionSecret) throw new Error("XCHAT_CACHE_ENCRYPTION_KEY cannot decrypt the existing cache")
+      const previousKey = encryptionKey(previousEncryptionSecret)
+      try {
+        if (open(marker.value_encrypted, previousKey) !== "xchat-cache-v1") throw new Error("Invalid marker")
+      } catch {
+        throw new Error("Neither the current nor previous XChat cache encryption key can decrypt the existing cache")
+      }
+      this.#rekey(previousKey)
+      return
+    }
+
+    const encryptedRows = this.#encryptedRows()
+    if (encryptedRows.length === 0) return
+    const previousKey = previousEncryptionSecret ? encryptionKey(previousEncryptionSecret) : this.#key
+    try {
+      for (const row of encryptedRows) open(row.value, previousKey)
+    } catch {
+      throw new Error("The supplied previous XChat cache encryption key cannot decrypt the existing cache")
+    }
+    this.#rekey(previousKey, encryptedRows)
+  }
+
+  #encryptedRows() {
+    const locations = [
+      ["xchat_cache_config", "value_encrypted"],
+      ["xchat_decrypted_events", "event_encrypted"],
+      ["xchat_webhook_deliveries", "body_encrypted"],
+    ]
+    const rows = []
+    for (const [table, column] of locations) {
+      const exists = this.#db.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
+      if (!exists) continue
+      for (const row of this.#db.prepare(`SELECT rowid AS id, ${column} AS value FROM ${table}`).all()) {
+        rows.push({ table, column, id: row.id, value: row.value })
+      }
+    }
+    return rows
+  }
+
+  #rekey(previousKey, prefetchedRows) {
+    const rows = prefetchedRows ?? this.#encryptedRows()
+    const opened = rows.map((row) => ({ ...row, value: open(row.value, previousKey) }))
+    this.#transaction(() => {
+      for (const row of opened) {
+        this.#db.prepare(`UPDATE ${row.table} SET ${row.column} = ? WHERE rowid = ?`)
+          .run(seal(row.value, this.#key), row.id)
+      }
+      this.#db.prepare(`
+        INSERT INTO xchat_cache_config (key, value_encrypted, updated_at)
+        VALUES ('encryption_marker', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_encrypted = excluded.value_encrypted, updated_at = excluded.updated_at
+      `).run(seal("xchat-cache-v1", this.#key), nowIso())
+    })
+  }
+
+  #ensureEncryptionMarker() {
+    const marker = this.#db.prepare("SELECT value_encrypted FROM xchat_cache_config WHERE key = 'encryption_marker'").get()
+    if (marker) {
+      if (open(marker.value_encrypted, this.#key) !== "xchat-cache-v1") throw new Error("Invalid XChat cache encryption marker")
+      return
+    }
+    this.#db.prepare(`
+      INSERT INTO xchat_cache_config (key, value_encrypted, updated_at)
+      VALUES ('encryption_marker', ?, ?)
+    `).run(seal("xchat-cache-v1", this.#key), nowIso())
   }
 
   #migrate() {
@@ -193,6 +314,34 @@ export class XChatCache {
         event_count INTEGER NOT NULL,
         duplicate_event_count INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS xchat_backfill_jobs (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        max_events INTEGER NOT NULL,
+        max_pages INTEGER NOT NULL,
+        pages_fetched INTEGER NOT NULL DEFAULT 0,
+        events_seen INTEGER NOT NULL DEFAULT 0,
+        unique_events INTEGER NOT NULL DEFAULT 0,
+        conversation_cursor TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS xchat_backfill_job_conversations (
+        job_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        event_cursor TEXT,
+        pages_fetched INTEGER NOT NULL DEFAULT 0,
+        events_seen INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        PRIMARY KEY (job_id, conversation_id),
+        FOREIGN KEY (job_id) REFERENCES xchat_backfill_jobs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS xchat_backfill_job_next
+        ON xchat_backfill_job_conversations (job_id, status, position);
       UPDATE xchat_events
       SET conversation_id = REPLACE(conversation_id, ':', '-')
       WHERE conversation_id LIKE '%:%'
@@ -213,6 +362,15 @@ export class XChatCache {
         WHERE xchat_events.event_uuid = xchat_decrypted_events.event_uuid
           AND xchat_events.conversation_id != xchat_decrypted_events.conversation_id
       );
+    `)
+    const keyEventColumns = this.#db.prepare("PRAGMA table_info(xchat_key_events)").all()
+    if (!keyEventColumns.some((column) => column.name === "position")) {
+      this.#db.exec("ALTER TABLE xchat_key_events ADD COLUMN position INTEGER")
+    }
+    this.#db.exec(`
+      UPDATE xchat_key_events SET position = rowid WHERE position IS NULL;
+      CREATE INDEX IF NOT EXISTS xchat_key_events_order
+        ON xchat_key_events (conversation_id, position);
     `)
   }
 
@@ -286,17 +444,19 @@ export class XChatCache {
 
   #upsertConversation(conversation, updatedAt = nowIso()) {
     const id = requiredString(conversation?.id, "conversation.id")
-    const participantIds = Array.isArray(conversation?.participant_ids)
+    const hasType = typeof conversation?.type === "string"
+    const hasParticipantIds = Array.isArray(conversation?.participant_ids)
+    const participantIds = hasParticipantIds
       ? conversation.participant_ids.filter((value) => typeof value === "string")
       : []
     this.#db.prepare(`
       INSERT INTO xchat_conversations (id, type, participant_ids_json, updated_at)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        type = excluded.type,
-        participant_ids_json = excluded.participant_ids_json,
+        type = CASE WHEN ? THEN excluded.type ELSE xchat_conversations.type END,
+        participant_ids_json = CASE WHEN ? THEN excluded.participant_ids_json ELSE xchat_conversations.participant_ids_json END,
         updated_at = excluded.updated_at
-    `).run(id, typeof conversation?.type === "string" ? conversation.type : null, JSON.stringify(participantIds), updatedAt)
+    `).run(id, hasType ? conversation.type : null, JSON.stringify(participantIds), updatedAt, hasType ? 1 : 0, hasParticipantIds ? 1 : 0)
   }
 
   ingestBackfill({ conversation, identity, signing_keys: signingKeys = [], key_events: keyEvents = [], events = [] }) {
@@ -390,9 +550,9 @@ export class XChatCache {
 
   #insertKeyEvent({ conversationId, encodedEvent, createdAt, source }) {
     this.#db.prepare(`
-      INSERT OR IGNORE INTO xchat_key_events (id, conversation_id, encoded_event, created_at, source)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(hash(encodedEvent), conversationId, encodedEvent, createdAt, source)
+      INSERT OR IGNORE INTO xchat_key_events (id, conversation_id, encoded_event, created_at, source, position)
+      VALUES (?, ?, ?, ?, ?, COALESCE((SELECT MAX(position) + 1 FROM xchat_key_events WHERE conversation_id = ?), 1))
+    `).run(hash(encodedEvent), conversationId, encodedEvent, createdAt, source, conversationId)
   }
 
   #insertEvent({ eventUuid, eventType, conversationId, senderId, encodedEvent, transportId, createdAt, source, receivedAt = nowIso() }) {
@@ -416,37 +576,44 @@ export class XChatCache {
   }
 
   processPending({ limit = 100 } = {}) {
+    this.#processRequested = true
     if (this.#processing) return this.#processing
-    this.#processing = this.#processPending(limit).finally(() => {
+    this.#processing = this.#drainPending(limit).finally(() => {
       this.#processing = null
     })
     return this.#processing
   }
 
-  async #processPending(limit) {
+  async #drainPending(limit) {
     const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
-    const rows = this.#db.prepare(`
-      SELECT * FROM xchat_events
-      WHERE status IN ('pending', 'failed') AND attempts < 10
-      ORDER BY received_at ASC
-      LIMIT ?
-    `).all(boundedLimit)
     let processed = 0
     let failed = 0
-    for (const row of rows) {
-      try {
-        await this.#processEvent(row)
-        processed += 1
-      } catch (error) {
-        failed += 1
-        this.#db.prepare(`
-          UPDATE xchat_events
-          SET status = 'failed', attempts = attempts + 1, last_error = ?
-          WHERE event_uuid = ?
-        `).run(String(error?.message ?? error).slice(0, 500), row.event_uuid)
+    let selected = 0
+    do {
+      this.#processRequested = false
+      const rows = this.#db.prepare(`
+        SELECT * FROM xchat_events
+        WHERE status = 'pending' AND attempts < 10
+        ORDER BY received_at ASC
+        LIMIT ?
+      `).all(boundedLimit)
+      selected += rows.length
+      for (const row of rows) {
+        try {
+          await this.#processEvent(row)
+          processed += 1
+        } catch (error) {
+          failed += 1
+          this.#db.prepare(`
+            UPDATE xchat_events
+            SET status = 'failed', attempts = attempts + 1, last_error = ?
+            WHERE event_uuid = ?
+          `).run(String(error?.message ?? error).slice(0, 500), row.event_uuid)
+        }
       }
-    }
-    return { selected: rows.length, processed, failed }
+      if (rows.length === boundedLimit) this.#processRequested = true
+    } while (this.#processRequested)
+    return { selected, processed, failed }
   }
 
   async #processEvent(row) {
@@ -461,15 +628,29 @@ export class XChatCache {
     const keyEvents = this.#db.prepare(`
       SELECT encoded_event FROM xchat_key_events
       WHERE conversation_id = ?
-      ORDER BY created_at ASC, id ASC
+      ORDER BY position ASC
     `).all(row.conversation_id).map((value) => value.encoded_event)
 
-    const result = await this.#decryptor.decrypt({
+    const decrypt = () => this.#decryptor.decrypt({
       identity,
-      signing_keys: signingKeys,
+      signing_keys: this.#db.prepare(`
+        SELECT user_id, public_key_version, public_key, signing_public_key, identity_public_key_signature
+        FROM xchat_signing_keys
+      `).all(),
       key_events: keyEvents,
       events: [row.encoded_event],
     })
+    let result
+    try {
+      result = await decrypt()
+      if (Array.isArray(result?.errors) && result.errors.length > 0) throw new Error("XChat signing key refresh required")
+    } catch (error) {
+      if (!this.#signingKeyProvider || !row.sender_id) throw error
+      const refreshedKeys = await this.#signingKeyProvider(row.sender_id)
+      if (!Array.isArray(refreshedKeys) || refreshedKeys.length === 0) throw error
+      this.addSigningKeys(refreshedKeys)
+      result = await decrypt()
+    }
     const errors = Array.isArray(result?.errors) ? result.errors : []
     if (errors.length > 0) throw new Error(`Chat XDK returned ${errors.length} decryption error(s)`)
     const messages = Array.isArray(result?.messages) ? result.messages : []
@@ -513,12 +694,24 @@ export class XChatCache {
     const clauses = []
     const parameters = []
     if (before) {
-      clauses.push("created_at < ?")
-      parameters.push(before)
+      const cursor = decodeCursor(before)
+      if (cursor.event_id) {
+        clauses.push("(created_at < ? OR (created_at = ? AND event_id < ?))")
+        parameters.push(cursor.created_at, cursor.created_at, cursor.event_id)
+      } else {
+        clauses.push("created_at < ?")
+        parameters.push(cursor.created_at)
+      }
     }
     if (after) {
-      clauses.push("created_at > ?")
-      parameters.push(after)
+      const cursor = decodeCursor(after)
+      if (cursor.event_id) {
+        clauses.push("(created_at > ? OR (created_at = ? AND event_id > ?))")
+        parameters.push(cursor.created_at, cursor.created_at, cursor.event_id)
+      } else {
+        clauses.push("created_at > ?")
+        parameters.push(cursor.created_at)
+      }
     }
     if (conversationId) {
       clauses.push("conversation_id = ?")
@@ -551,7 +744,7 @@ export class XChatCache {
       })),
       meta: {
         result_count: rows.length,
-        next_before: rows.length === boundedLimit ? rows.at(-1).created_at : null,
+        next_before: rows.length === boundedLimit ? encodeCursor(rows.at(-1)) : null,
       },
     }
   }
@@ -582,6 +775,94 @@ export class XChatCache {
       })),
       meta: { result_count: rows.length },
     }
+  }
+
+  createBackfillJob({ max_events: maxEvents, max_pages: maxPages }) {
+    const boundedEvents = Number(maxEvents)
+    const boundedPages = Number(maxPages)
+    if (!Number.isInteger(boundedEvents) || boundedEvents < 1 || !Number.isInteger(boundedPages) || boundedPages < 1) {
+      const error = new Error("max_events and max_pages must be positive integers")
+      error.status = 400
+      throw error
+    }
+    const id = randomUUID()
+    const timestamp = nowIso()
+    this.#db.prepare(`
+      INSERT INTO xchat_backfill_jobs (
+        id, status, stage, max_events, max_pages, created_at, updated_at
+      ) VALUES (?, 'pending', 'conversations', ?, ?, ?, ?)
+    `).run(id, boundedEvents, boundedPages, timestamp, timestamp)
+    return this.getBackfillJob(id)
+  }
+
+  getBackfillJob(id) {
+    const job = this.#db.prepare("SELECT * FROM xchat_backfill_jobs WHERE id = ?").get(id)
+    if (!job) return null
+    const conversations = this.#db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+      FROM xchat_backfill_job_conversations WHERE job_id = ?
+    `).get(id)
+    return { ...job, conversations }
+  }
+
+  listBackfillJobs({ limit = 20 } = {}) {
+    const boundedLimit = Math.max(1, Math.min(Number(limit) || 20, 100))
+    return { data: this.#db.prepare("SELECT * FROM xchat_backfill_jobs ORDER BY created_at DESC LIMIT ?").all(boundedLimit) }
+  }
+
+  updateBackfillJob(id, values) {
+    const allowed = new Set([
+      "status", "stage", "pages_fetched", "events_seen", "unique_events", "conversation_cursor", "last_error",
+    ])
+    const entries = Object.entries(values).filter(([key]) => allowed.has(key))
+    if (entries.length === 0) return this.getBackfillJob(id)
+    const assignments = entries.map(([key]) => `${key} = ?`).join(", ")
+    this.#db.prepare(`UPDATE xchat_backfill_jobs SET ${assignments}, updated_at = ? WHERE id = ?`)
+      .run(...entries.map(([, value]) => value), nowIso(), id)
+    return this.getBackfillJob(id)
+  }
+
+  addBackfillJobConversations(jobId, conversations) {
+    this.#transaction(() => {
+      const nextPosition = this.#db.prepare(`
+        SELECT COALESCE(MAX(position), 0) + 1 AS position
+        FROM xchat_backfill_job_conversations WHERE job_id = ?
+      `).get(jobId).position
+      const insert = this.#db.prepare(`
+        INSERT OR IGNORE INTO xchat_backfill_job_conversations (job_id, conversation_id, position)
+        VALUES (?, ?, ?)
+      `)
+      let offset = 0
+      for (const conversation of conversations) {
+        this.#upsertConversation(conversation)
+        const result = insert.run(jobId, requiredString(conversation?.id, "conversation.id"), nextPosition + offset)
+        if (result.changes > 0) offset += 1
+      }
+    })
+  }
+
+  nextBackfillConversation(jobId) {
+    return this.#db.prepare(`
+      SELECT q.*, c.type, c.participant_ids_json
+      FROM xchat_backfill_job_conversations q
+      JOIN xchat_conversations c ON c.id = q.conversation_id
+      WHERE q.job_id = ? AND q.status IN ('pending', 'running')
+      ORDER BY q.position ASC LIMIT 1
+    `).get(jobId)
+  }
+
+  updateBackfillConversation(jobId, conversationId, values) {
+    const allowed = new Set(["status", "event_cursor", "pages_fetched", "events_seen", "last_error"])
+    const entries = Object.entries(values).filter(([key]) => allowed.has(key))
+    if (entries.length === 0) return
+    const assignments = entries.map(([key]) => `${key} = ?`).join(", ")
+    this.#db.prepare(`
+      UPDATE xchat_backfill_job_conversations SET ${assignments}
+      WHERE job_id = ? AND conversation_id = ?
+    `).run(...entries.map(([, value]) => value), jobId, conversationId)
   }
 
   status() {
