@@ -93,8 +93,7 @@ test("refreshes the current Juicebox identity through the official public-key en
   const api = new XChatApi({
     client: {
       users: {
-        getPublicKeys: async (userIds, options) => {
-          assert.deepEqual(userIds, ["self"])
+        getPublicKey: async (_userId, options) => {
           requestedFields = options.publicKeyFields
           return {
             data: [{
