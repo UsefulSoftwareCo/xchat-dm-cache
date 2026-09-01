@@ -1178,6 +1178,17 @@ export class XChatCache {
             last_error = NULL, updated_at = ?
         WHERE id = ?
       `).run(boundedEventCount, boundedInsertedCount, nowIso(), jobId)
+      if (conversationComplete) {
+        this.#db.prepare(`
+          UPDATE xchat_backfill_jobs
+          SET stage = 'complete', status = 'completed', last_error = NULL, updated_at = ?
+          WHERE id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM xchat_backfill_job_conversations
+              WHERE job_id = ? AND status != 'completed'
+            )
+        `).run(nowIso(), jobId, jobId)
+      }
     })
     return { job: this.getBackfillJob(jobId), conversation_complete: conversationComplete }
   }

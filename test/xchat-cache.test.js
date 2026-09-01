@@ -773,6 +773,29 @@ test("checkpoints an externally fetched backfill page with compare-and-set", asy
   cache.close()
 })
 
+test("completes an external backfill job with its final conversation checkpoint", async () => {
+  const { cache } = await cacheFixture()
+  const job = cache.createBackfillJob({ max_events: 1000, max_pages: 100 })
+  cache.updateBackfillJob(job.id, { stage: "events" })
+  cache.addBackfillJobConversations(job.id, [{ id: "final-conversation", participant_ids: ["self", "sender"] }])
+
+  const checkpoint = cache.checkpointBackfillPage({
+    job_id: job.id,
+    conversation_id: "final-conversation",
+    expected_cursor: null,
+    next_token: null,
+    has_more: false,
+    event_count: 0,
+    inserted_count: 0,
+  })
+
+  assert.equal(checkpoint.conversation_complete, true)
+  assert.equal(checkpoint.job.stage, "complete")
+  assert.equal(checkpoint.job.status, "completed")
+  assert.equal(cache.getBackfillWorkItem(job.id), null)
+  cache.close()
+})
+
 test("recognizes the object-shaped error map returned by the Chat XDK", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-cache-error-map-"))
   const refreshedUsers = []
