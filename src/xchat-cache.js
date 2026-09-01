@@ -438,6 +438,23 @@ export class XChatCache {
     return Boolean(this.#db.prepare("SELECT 1 FROM xchat_signing_keys WHERE user_id = ? LIMIT 1").get(userId))
   }
 
+  listMissingSigningKeyUsers({ limit = 100, after } = {}) {
+    const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 100))
+    const rows = this.#db.prepare(`
+      SELECT DISTINCT e.sender_id AS user_id
+      FROM xchat_events e
+      WHERE e.sender_id IS NOT NULL
+        AND e.sender_id > ?
+        AND NOT EXISTS (SELECT 1 FROM xchat_signing_keys k WHERE k.user_id = e.sender_id)
+      ORDER BY e.sender_id ASC
+      LIMIT ?
+    `).all(typeof after === "string" ? after : "", boundedLimit)
+    return {
+      data: rows.map(({ user_id: userId }) => ({ user_id: userId })),
+      meta: { next_after: rows.length === boundedLimit ? rows.at(-1).user_id : null },
+    }
+  }
+
   #upsertSigningKeys(signingKeys, updatedAt) {
     const statement = this.#db.prepare(`
       INSERT INTO xchat_signing_keys (

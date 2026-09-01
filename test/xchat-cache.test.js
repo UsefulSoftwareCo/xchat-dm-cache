@@ -576,6 +576,24 @@ test("does not reset failed events for an unchanged signing key", async () => {
   cache.close()
 })
 
+test("lists missing signing-key users with a stable private cursor", async () => {
+  const { cache } = await cacheFixture()
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [
+      { event_uuid: "known", sender_id: "sender", encoded_event: "known" },
+      { event_uuid: "missing-a", sender_id: "missing-a", encoded_event: "missing-a" },
+      { event_uuid: "missing-b", sender_id: "missing-b", encoded_event: "missing-b" },
+    ],
+  })
+
+  const first = cache.listMissingSigningKeyUsers({ limit: 1 })
+  const second = cache.listMissingSigningKeyUsers({ limit: 1, after: first.meta.next_after })
+  assert.deepEqual(first.data, [{ user_id: "missing-a" }])
+  assert.deepEqual(second.data, [{ user_id: "missing-b" }])
+  cache.close()
+})
+
 test("recognizes the object-shaped error map returned by the Chat XDK", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-cache-error-map-"))
   const refreshedUsers = []

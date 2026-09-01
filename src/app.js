@@ -108,6 +108,14 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
         return json(response, 200, xchatCache.addSigningKeys(body.signing_keys))
       }
 
+      if (url.pathname === "/xchat/cache/signing-key-users/missing" && request.method === "GET") {
+        if (!xchatCache) return cacheUnavailable(response)
+        return json(response, 200, xchatCache.listMissingSigningKeyUsers({
+          limit: url.searchParams.get("limit"),
+          after: url.searchParams.get("after") || undefined,
+        }))
+      }
+
       if (url.pathname === "/xchat/cache/backfill" && request.method === "POST") {
         if (!xchatCache) return cacheUnavailable(response)
         const result = xchatCache.ingestBackfill(await readJson(request))
@@ -401,6 +409,17 @@ export function openApiDocument(publicBaseUrl) {
             properties: { limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 } },
           } } } },
           responses: { "200": { description: "Processing counts" }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/signing-key-users/missing": {
+        get: {
+          operationId: "listMissingXChatSigningKeyUsers",
+          summary: "List private XChat sender IDs that need public signing keys",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 100 } },
+            { name: "after", in: "query", schema: { type: "string" } },
+          ],
+          responses: { "200": { description: "Missing signing-key user IDs", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
         },
       },
       "/xchat/cache/messages": {
