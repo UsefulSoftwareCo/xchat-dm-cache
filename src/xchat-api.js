@@ -176,7 +176,7 @@ export class XChatApi {
   async getIdentity(userId, publicKeyVersion) {
     if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
     const response = await this.#call(async (client) => {
-      const value = await client.users.getPublicKey(userId, { publicKeyFields: identityFields })
+      const value = await client.users.getPublicKeys([userId], { publicKeyFields: identityFields })
       apiError(value, `Get XChat identity for ${userId}`)
       return value
     })
