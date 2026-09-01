@@ -820,7 +820,12 @@ export class XChatCache {
       result = await decrypt()
       if (hasDecryptionErrors(result)) throw new Error("XChat signing key refresh required")
     } catch (error) {
-      if (!this.#signingKeyProvider || !row.sender_id || row.source === "backfill") throw error
+      if (
+        !this.#signingKeyProvider
+        || !row.sender_id
+        || row.source === "backfill"
+        || !this.hasSigningKeys(row.sender_id)
+      ) throw error
       const refreshedKeys = await this.#signingKeyProvider(row.sender_id)
       if (!Array.isArray(refreshedKeys) || refreshedKeys.length === 0) throw error
       const update = this.addSigningKeys(refreshedKeys)

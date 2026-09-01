@@ -237,8 +237,8 @@ test("stops isolated retries when a signing-key refresh is throttled", async () 
   cache.configure({ identity, signing_keys: [signingKey] })
   cache.acceptWebhook({
     data: [
-      { event_type: "chat.received", event_uuid: "throttled-1", payload: { conversation_id: "conversation-1", sender_id: "missing", encoded_event: "ciphertext-1" } },
-      { event_type: "chat.received", event_uuid: "throttled-2", payload: { conversation_id: "conversation-1", sender_id: "missing", encoded_event: "ciphertext-2" } },
+      { event_type: "chat.received", event_uuid: "throttled-1", payload: { conversation_id: "conversation-1", sender_id: "sender", encoded_event: "ciphertext-1" } },
+      { event_type: "chat.received", event_uuid: "throttled-2", payload: { conversation_id: "conversation-1", sender_id: "sender", encoded_event: "ciphertext-2" } },
     ],
   })
 
@@ -632,6 +632,32 @@ test("does not fetch signing keys while retrying historical events", async () =>
   cache.ingestBackfill({
     conversation: { id: "conversation-1" },
     events: [{ event_uuid: "history-key", sender_id: "sender", encoded_event: "ciphertext" }],
+  })
+
+  assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
+  assert.equal(keyCalls, 0)
+  cache.close()
+})
+
+test("does not fetch a missing live sender key from the history credential", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-live-missing-key-"))
+  let keyCalls = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    signingKeyProvider: async () => {
+      keyCalls += 1
+      return []
+    },
+    decryptor: { decrypt: async () => ({ messages: [], errors: { "0": "missing sender key" } }) },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.acceptWebhook({
+    data: {
+      event_type: "chat.received",
+      event_uuid: "live-missing-key",
+      payload: { conversation_id: "conversation-1", sender_id: "missing", encoded_event: "ciphertext" },
+    },
   })
 
   assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
