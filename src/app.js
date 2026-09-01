@@ -1,7 +1,8 @@
 import { timingSafeEqual } from "node:crypto"
+import { verifyWebhookSignature, webhookCrcResponse } from "./xchat-cache.js"
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
-const maximumBodyBytes = 1024 * 1024
+const maximumBodyBytes = 8 * 1024 * 1024
 
 function json(response, status, body) {
   response.writeHead(status, {
@@ -19,23 +20,31 @@ function isAuthorized(request, apiKey) {
   return supplied.length === expected.length && timingSafeEqual(supplied, expected)
 }
 
-async function readJson(request) {
+async function readBody(request) {
   const chunks = []
   let size = 0
   for await (const chunk of request) {
     size += chunk.length
     if (size > maximumBodyBytes) {
-      const error = new Error("Request body exceeds 1 MiB")
+      const error = new Error("Request body exceeds 8 MiB")
       error.status = 413
       throw error
     }
     chunks.push(chunk)
   }
   if (size === 0) throw new Error("Request body is required")
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"))
+  return Buffer.concat(chunks)
 }
 
-export function createHandler({ store, apiKey, publicBaseUrl, xchat }) {
+async function readJson(request) {
+  return JSON.parse((await readBody(request)).toString("utf8"))
+}
+
+function cacheUnavailable(response) {
+  return json(response, 503, { error: "XChat cache is not available" })
+}
+
+export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache, webhookSecret }) {
   if (!apiKey) throw new Error("STATE_API_KEY is required")
 
   return async function handler(request, response) {
@@ -43,11 +52,37 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat }) {
       const url = new URL(request.url, "http://localhost")
 
       if (request.method === "GET" && url.pathname === "/health") {
-        return json(response, 200, { ok: true, xchat_configured: xchat?.configured ?? false })
+        return json(response, 200, {
+          ok: true,
+          xchat_configured: xchat?.configured ?? false,
+          xchat_cache: xchatCache?.status() ?? null,
+          xchat_webhook_configured: Boolean(webhookSecret),
+        })
       }
 
       if (request.method === "GET" && url.pathname === "/openapi.json") {
         return json(response, 200, openApiDocument(publicBaseUrl))
+      }
+
+      if (request.method === "GET" && url.pathname === "/xchat/webhook") {
+        if (!webhookSecret) return json(response, 503, { error: "X webhook is not configured" })
+        const crcToken = url.searchParams.get("crc_token")
+        if (!crcToken) return json(response, 400, { error: "crc_token is required" })
+        return json(response, 200, { response_token: webhookCrcResponse(crcToken, webhookSecret) })
+      }
+
+      if (request.method === "POST" && url.pathname === "/xchat/webhook") {
+        if (!xchatCache || !webhookSecret) return cacheUnavailable(response)
+        const rawBody = await readBody(request)
+        const signature = request.headers["x-twitter-webhooks-signature"]
+        if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
+          return json(response, 401, { error: "Invalid webhook signature" })
+        }
+        const result = xchatCache.acceptWebhook(JSON.parse(rawBody.toString("utf8")), rawBody)
+        queueMicrotask(() => {
+          xchatCache.processPending().catch((error) => console.error("XChat webhook processing failed", error))
+        })
+        return json(response, 200, result)
       }
 
       if (!isAuthorized(request, apiKey)) {
@@ -59,6 +94,63 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat }) {
         if (!xchat) return json(response, 503, { error: "XChat is not available" })
         const body = await readJson(request)
         return json(response, 200, await xchat.decrypt(body))
+      }
+
+      if (url.pathname === "/xchat/cache/configure" && request.method === "POST") {
+        if (!xchatCache) return cacheUnavailable(response)
+        return json(response, 200, xchatCache.configure(await readJson(request)))
+      }
+
+      if (url.pathname === "/xchat/cache/signing-keys" && request.method === "POST") {
+        if (!xchatCache) return cacheUnavailable(response)
+        const body = await readJson(request)
+        return json(response, 200, xchatCache.addSigningKeys(body.signing_keys))
+      }
+
+      if (url.pathname === "/xchat/cache/backfill" && request.method === "POST") {
+        if (!xchatCache) return cacheUnavailable(response)
+        const result = xchatCache.ingestBackfill(await readJson(request))
+        const processing = await xchatCache.processPending({ limit: 1000 })
+        return json(response, 200, { ...result, processing })
+      }
+
+      if (url.pathname === "/xchat/cache/process" && request.method === "POST") {
+        if (!xchatCache) return cacheUnavailable(response)
+        const body = await readJson(request).catch(() => ({}))
+        return json(response, 200, await xchatCache.processPending({ limit: body.limit }))
+      }
+
+      if (url.pathname === "/xchat/cache/messages" && request.method === "GET") {
+        if (!xchatCache) return cacheUnavailable(response)
+        return json(response, 200, xchatCache.listMessages({
+          limit: url.searchParams.get("limit"),
+          before: url.searchParams.get("before") || undefined,
+          after: url.searchParams.get("after") || undefined,
+          conversation_id: url.searchParams.get("conversation_id") || undefined,
+          direction: url.searchParams.get("direction") || undefined,
+        }))
+      }
+
+      if (url.pathname === "/xchat/cache/events" && request.method === "GET") {
+        if (!xchatCache) return cacheUnavailable(response)
+        return json(response, 200, xchatCache.listEvents({
+          limit: url.searchParams.get("limit"),
+          before: url.searchParams.get("before") || undefined,
+          after: url.searchParams.get("after") || undefined,
+          conversation_id: url.searchParams.get("conversation_id") || undefined,
+          direction: url.searchParams.get("direction") || undefined,
+          event_type: url.searchParams.get("event_type") || undefined,
+        }))
+      }
+
+      if (url.pathname === "/xchat/cache/conversations" && request.method === "GET") {
+        if (!xchatCache) return cacheUnavailable(response)
+        return json(response, 200, xchatCache.listConversations({ limit: url.searchParams.get("limit") }))
+      }
+
+      if (url.pathname === "/xchat/cache/status" && request.method === "GET") {
+        if (!xchatCache) return cacheUnavailable(response)
+        return json(response, 200, xchatCache.status())
       }
 
       const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent)
@@ -107,6 +199,35 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat }) {
 
 export function openApiDocument(publicBaseUrl) {
   const valueSchema = {}
+  const identitySchema = {
+    type: "object",
+    required: ["user_id", "public_key_version", "juicebox_config"],
+    properties: {
+      user_id: { type: "string" },
+      public_key_version: { type: "string" },
+      juicebox_config: { type: "object", additionalProperties: true },
+    },
+  }
+  const signingKeySchema = {
+    type: "object",
+    required: ["user_id", "public_key_version", "public_key", "signing_public_key", "identity_public_key_signature"],
+    properties: {
+      user_id: { type: "string" },
+      public_key_version: { type: "string" },
+      public_key: { type: "string" },
+      signing_public_key: { type: "string" },
+      identity_public_key_signature: { type: "string" },
+    },
+  }
+  const conversationSchema = {
+    type: "object",
+    required: ["id"],
+    properties: {
+      id: { type: "string" },
+      type: { type: "string" },
+      participant_ids: { type: "array", items: { type: "string" }, default: [] },
+    },
+  }
   const errorResponses = {
     "401": { description: "Missing or invalid bearer token" },
     "404": { description: "State value not found" },
@@ -118,7 +239,7 @@ export function openApiDocument(publicBaseUrl) {
 
   return {
     openapi: "3.1.0",
-    info: { title: "Executor State Handler", version: "0.2.0" },
+    info: { title: "Executor State Handler", version: "0.3.0" },
     ...(publicBaseUrl ? { servers: [{ url: publicBaseUrl }] } : {}),
     components: {
       securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
@@ -144,29 +265,11 @@ export function openApiDocument(publicBaseUrl) {
                   type: "object",
                   required: ["identity", "signing_keys", "events"],
                   properties: {
-                    identity: {
-                      type: "object",
-                      required: ["user_id", "public_key_version", "juicebox_config"],
-                      properties: {
-                        user_id: { type: "string" },
-                        public_key_version: { type: "string" },
-                        juicebox_config: { type: "object", additionalProperties: true },
-                      },
-                    },
+                    identity: identitySchema,
                     signing_keys: {
                       type: "array",
                       minItems: 1,
-                      items: {
-                        type: "object",
-                        required: ["user_id", "public_key_version", "public_key", "signing_public_key", "identity_public_key_signature"],
-                        properties: {
-                          user_id: { type: "string" },
-                          public_key_version: { type: "string" },
-                          public_key: { type: "string" },
-                          signing_public_key: { type: "string" },
-                          identity_public_key_signature: { type: "string" },
-                        },
-                      },
+                      items: signingKeySchema,
                     },
                     key_events: { type: "array", items: { type: "string" }, default: [] },
                     events: { type: "array", items: { type: "string" } },
@@ -181,6 +284,128 @@ export function openApiDocument(publicBaseUrl) {
             "401": errorResponses["401"],
             "503": { description: "XChat PIN is not configured" },
           },
+        },
+      },
+      "/xchat/cache/configure": {
+        post: {
+          operationId: "configureXChatCache",
+          summary: "Configure the private XChat cache identity and public signing keys",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: {
+              type: "object",
+              required: ["identity", "signing_keys"],
+              properties: {
+                identity: identitySchema,
+                signing_keys: { type: "array", items: signingKeySchema },
+                conversations: { type: "array", items: conversationSchema, default: [] },
+              },
+            } } },
+          },
+          responses: { "200": { description: "Cache configuration summary" }, "400": { description: "Invalid configuration" }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/signing-keys": {
+        post: {
+          operationId: "addXChatSigningKeys",
+          summary: "Add or update cached XChat public signing keys",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: {
+              type: "object",
+              required: ["signing_keys"],
+              properties: { signing_keys: { type: "array", minItems: 1, items: signingKeySchema } },
+            } } },
+          },
+          responses: { "200": { description: "Stored key count" }, "400": { description: "Invalid keys" }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/backfill": {
+        post: {
+          operationId: "ingestXChatBackfillPage",
+          summary: "Ingest and decrypt one historical XChat event page idempotently",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: {
+              type: "object",
+              required: ["conversation", "events"],
+              properties: {
+                conversation: conversationSchema,
+                identity: identitySchema,
+                signing_keys: { type: "array", items: signingKeySchema, default: [] },
+                key_events: { type: "array", items: { type: "string" }, default: [] },
+                events: { type: "array", items: {
+                  type: "object",
+                  required: ["encoded_event"],
+                  properties: {
+                    event_uuid: { type: "string" },
+                    event_type: { type: "string" },
+                    id: { type: "string" },
+                    conversation_id: { type: "string" },
+                    sender_id: { type: "string" },
+                    encoded_event: { type: "string" },
+                    created_at: { type: "string", format: "date-time" },
+                  },
+                } },
+              },
+            } } },
+          },
+          responses: { "200": { description: "Ingestion and processing counts" }, "400": { description: "Invalid page" }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/process": {
+        post: {
+          operationId: "processPendingXChatEvents",
+          summary: "Retry pending XChat cache events",
+          requestBody: { content: { "application/json": { schema: {
+            type: "object",
+            properties: { limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 } },
+          } } } },
+          responses: { "200": { description: "Processing counts" }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/messages": {
+        get: {
+          operationId: "listCachedXChatMessages",
+          summary: "List decrypted messages from the private XChat cache",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
+            { name: "before", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "after", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "conversation_id", in: "query", schema: { type: "string" } },
+            { name: "direction", in: "query", schema: { type: "string", enum: ["sent", "received"] } },
+          ],
+          responses: { "200": { description: "Cached decrypted messages", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/events": {
+        get: {
+          operationId: "listCachedXChatEvents",
+          summary: "List all decrypted XChat events from the private cache",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
+            { name: "before", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "after", in: "query", schema: { type: "string", format: "date-time" } },
+            { name: "conversation_id", in: "query", schema: { type: "string" } },
+            { name: "direction", in: "query", schema: { type: "string", enum: ["sent", "received"] } },
+            { name: "event_type", in: "query", schema: { type: "string" } },
+          ],
+          responses: { "200": { description: "Cached decrypted XChat events", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/conversations": {
+        get: {
+          operationId: "listCachedXChatConversations",
+          summary: "List XChat cache conversation summaries",
+          parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } }],
+          responses: { "200": { description: "Cached conversation summaries", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/xchat/cache/status": {
+        get: {
+          operationId: "getXChatCacheStatus",
+          summary: "Get private XChat cache counts and readiness",
+          responses: { "200": { description: "Cache status", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
         },
       },
       "/state/{namespace}": {
