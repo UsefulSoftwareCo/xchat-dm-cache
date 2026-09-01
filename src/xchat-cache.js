@@ -4,6 +4,12 @@ import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 
 const nowIso = () => new Date().toISOString()
+const XCHAT_WEBHOOK_EVENT_TYPES = new Set([
+  "chat.received",
+  "chat.sent",
+  "chat.conversation.join",
+  "chat.conversation_join",
+])
 
 function requiredString(value, name) {
   if (typeof value !== "string" || value.length === 0) {
@@ -514,7 +520,7 @@ export class XChatCache {
 
     this.#transaction(() => {
       for (const value of events) {
-        if (!["chat.received", "chat.sent", "chat.conversation_join"].includes(value.event_type)) continue
+        if (!XCHAT_WEBHOOK_EVENT_TYPES.has(value.event_type)) continue
         const payload = value.payload ?? {}
         const conversationId = requiredString(payload.conversation_id, "data.payload.conversation_id")
         this.#upsertConversation({ id: conversationId }, receivedAt)

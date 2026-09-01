@@ -177,6 +177,26 @@ test("deduplicates live webhook deliveries and message events", async () => {
   cache.close()
 })
 
+test("accepts the conversation join event spelling emitted by X", async () => {
+  const { cache } = await cacheFixture()
+  const body = {
+    data: {
+      event_type: "chat.conversation.join",
+      event_uuid: "webhook-join-1",
+      payload: { conversation_id: "conversation-joined" },
+    },
+  }
+
+  assert.deepEqual(cache.acceptWebhook(body), { accepted: true, inserted: 0, duplicates: 0 })
+  assert.equal(cache.status().webhook_deliveries, 1)
+  assert.equal(cache.status().conversations, 2)
+  assert.equal(
+    cache.listConversations().data.some((conversation) => conversation.id === "conversation-joined"),
+    true,
+  )
+  cache.close()
+})
+
 test("preserves conversation metadata when a webhook only supplies an id", async () => {
   const { cache } = await cacheFixture()
   cache.ingestBackfill({
