@@ -19,7 +19,6 @@ function rateLimitDelay(error, fallbackDelayMs, now) {
 export class XChatSync {
   #api
   #cache
-  #checkedSigningKeyUsers = new Set()
   #lastDiagnostic = null
   #running = new Map()
   #scheduled = new Set()
@@ -154,20 +153,6 @@ export class XChatSync {
       return
     }
     const participantIds = JSON.parse(conversation.participant_ids_json)
-    for (const participantId of participantIds) {
-      if (this.#cache.hasSigningKeys(participantId) || this.#checkedSigningKeyUsers.has(participantId)) continue
-      this.#report("signing_key_read_started")
-      let keys
-      try {
-        keys = await this.#api.getSigningKeys(participantId)
-      } catch (error) {
-        this.#report("signing_key_read_failed", { status: Number(error?.status ?? error?.response?.status) || null })
-        throw error
-      }
-      this.#report("signing_key_read_completed", { key_count: keys.length })
-      this.#checkedSigningKeyUsers.add(participantId)
-      if (keys.length > 0) this.#cache.addSigningKeys(keys)
-    }
     const remainingEvents = Math.max(1, job.max_events - job.events_seen)
     this.#report("conversation_event_read_started")
     let page
@@ -190,7 +175,6 @@ export class XChatSync {
       key_events: page.key_events,
       events: page.events,
     })
-    await this.#cache.processPending({ limit: 1000 })
     const conversationComplete = !page.has_more || !page.next_token
     this.#cache.updateBackfillConversation(job.id, conversation.conversation_id, {
       status: conversationComplete ? "completed" : "running",

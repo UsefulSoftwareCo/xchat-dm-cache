@@ -9,6 +9,7 @@ import { XChatSync } from "./xchat-sync.js"
 import { createChat } from "@xdevplatform/chat-xdk"
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10)
+const pendingRetryIntervalMs = 15 * 60 * 1000
 const stateFile = process.env.STATE_FILE ?? "./data/state.json"
 const store = new JsonStore(stateFile)
 await store.load()
@@ -54,8 +55,10 @@ const server = createServer(createHandler({
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Executor state handler listening on port ${port}`)
-  void xchatCache.processPending({ limit: 1000 }).catch((error) => {
-    console.error("XChat startup processing failed", error)
+  const processPending = () => void xchatCache.processPending({ limit: 1000 }).catch((error) => {
+    console.error("XChat pending processing failed", error)
   })
+  processPending()
+  setInterval(processPending, pendingRetryIntervalMs).unref()
   xchatSync.resumeIncompleteJobs()
 })

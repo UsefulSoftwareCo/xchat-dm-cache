@@ -55,6 +55,8 @@ test("checkpoints and completes a bounded XChat archive backfill", async () => {
   assert.equal(completed.events_seen, 2)
   assert.equal(completed.unique_events, 2)
   assert.deepEqual(eventTokens, [null, "next"])
+  assert.equal(cache.status().pending_events, 2)
+  await cache.processPending()
   assert.equal(cache.status().messages, 2)
   assert.deepEqual(cache.listConversations().data[0].participant_ids, ["self", "sender"])
   cache.close()
@@ -176,28 +178,24 @@ test("retries at the reset time reported by X", async () => {
   cache.close()
 })
 
-test("reuses persisted signing keys across event pages", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-signing-keys-"))
+test("does not block archive pages on participant signing-key reads", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-deferred-signing-keys-"))
   const cache = await XChatCache.open({
     filePath: join(directory, "cache.sqlite"),
     encryptionSecret: "test-state-api-key",
     decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
   })
   cache.configure({ identity, signing_keys: [signingKey("self")] })
-  let signingKeyRequests = 0
   let eventPages = 0
   const api = {
     configured: true,
     listConversations: async () => ({ data: [{ id: "conversation-1", participant_ids: ["self", "sender"] }], next_token: null, has_more: false }),
-    getSigningKeys: async (userId) => {
-      signingKeyRequests += 1
-      return [signingKey(userId)]
-    },
+    getSigningKeys: async () => { throw new Error("signing keys must be deferred until decryption") },
     listConversationEvents: async () => {
       eventPages += 1
       return eventPages === 1
-        ? { events: [], key_events: [], next_token: "next", has_more: true }
-        : { events: [], key_events: [], next_token: null, has_more: false }
+        ? { events: [{ event_uuid: "deferred-1", encoded_event: "ciphertext-1", sender_id: "sender" }], key_events: [], next_token: "next", has_more: true }
+        : { events: [{ event_uuid: "deferred-2", encoded_event: "ciphertext-2", sender_id: "sender" }], key_events: [], next_token: null, has_more: false }
     },
   }
   const sync = new XChatSync({ api, cache })
@@ -207,46 +205,7 @@ test("reuses persisted signing keys across event pages", async () => {
 
   assert.equal(result.status, "completed")
   assert.equal(eventPages, 2)
-  assert.equal(signingKeyRequests, 1)
-  cache.close()
-})
-
-test("does not repeat an empty signing-key lookup on every event page", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-empty-signing-keys-"))
-  const cache = await XChatCache.open({
-    filePath: join(directory, "cache.sqlite"),
-    encryptionSecret: "test-state-api-key",
-    decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
-  })
-  cache.configure({ identity, signing_keys: [signingKey("self")] })
-  let signingKeyRequests = 0
-  let eventPages = 0
-  const api = {
-    configured: true,
-    listConversations: async () => ({
-      data: [{ id: "conversation-1", participant_ids: ["self", "no-key"] }],
-      next_token: null,
-      has_more: false,
-    }),
-    getSigningKeys: async () => {
-      signingKeyRequests += 1
-      return []
-    },
-    listConversationEvents: async () => {
-      eventPages += 1
-      return eventPages === 1
-        ? { events: [], key_events: [], next_token: "next", has_more: true }
-        : { events: [], key_events: [], next_token: null, has_more: false }
-    },
-  }
-  const sync = new XChatSync({ api, cache })
-  const job = sync.createJob({ max_events: 10, max_pages: 10 })
-
-  const result = await sync.runJob(job.id)
-
-  assert.equal(result.status, "completed")
-  assert.equal(eventPages, 2)
-  assert.equal(signingKeyRequests, 1)
+  assert.equal(cache.status().pending_events, 2)
   cache.close()
 })
 
