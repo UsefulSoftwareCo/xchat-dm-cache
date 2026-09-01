@@ -55,6 +55,24 @@ async function cacheFixture() {
   return { cache, calls, filePath }
 }
 
+test("prepares decryption from the encrypted cached identity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-prepare-"))
+  const prepared = []
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    decryptor: {
+      prepare: async (value) => prepared.push(value),
+      decrypt: async () => ({ messages: [], errors: [] }),
+    },
+    encryptionSecret: "test-state-api-key",
+  })
+  assert.deepEqual(await cache.prepareDecryption(), { ready: false })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  assert.deepEqual(await cache.prepareDecryption(), { ready: true })
+  assert.deepEqual(prepared, [identity])
+  cache.close()
+})
+
 test("deduplicates backfill events and encrypts private values at rest", async () => {
   const { cache, calls, filePath } = await cacheFixture()
   const page = {

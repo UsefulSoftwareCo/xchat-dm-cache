@@ -660,6 +660,13 @@ export class XChatCache {
     return this.#processing
   }
 
+  async prepareDecryption() {
+    const identity = this.#identityOrNull()
+    if (!identity) return { ready: false }
+    await this.#decryptor.prepare(identity)
+    return { ready: true }
+  }
+
   async #drainPending(limit) {
     const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
     let processed = 0

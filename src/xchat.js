@@ -81,6 +81,42 @@ export class XChatDecryptor {
     return this.#lastDiagnostic
   }
 
+  async prepare(identity) {
+    if (!this.#pin) {
+      const error = new Error("XChat PIN is not configured")
+      error.status = 503
+      throw error
+    }
+    const userId = requiredString(identity?.user_id, "identity.user_id")
+    const publicKeyVersion = requiredString(identity?.public_key_version, "identity.public_key_version")
+    const juiceboxConfig = identity?.juicebox_config
+    if (!juiceboxConfig || typeof juiceboxConfig !== "object" || Array.isArray(juiceboxConfig)) {
+      const error = new Error("identity.juicebox_config must be an object")
+      error.status = 400
+      throw error
+    }
+    try {
+      await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
+    } catch (error) {
+      if (!this.#refreshIdentity || !/InvalidAuth/i.test(String(error?.message ?? error))) throw error
+      this.#report("identity_refresh_started", {})
+      let refreshedIdentity
+      try {
+        refreshedIdentity = await this.#refreshIdentity({ userId, publicKeyVersion })
+      } catch (refreshError) {
+        this.#report("identity_refresh_failed", diagnosticError(refreshError))
+        throw refreshError
+      }
+      this.#report("identity_refresh_completed", {})
+      await this.#getSession({
+        userId: requiredString(refreshedIdentity?.user_id, "refreshed identity.user_id"),
+        publicKeyVersion: requiredString(refreshedIdentity?.public_key_version, "refreshed identity.public_key_version"),
+        juiceboxConfig: refreshedIdentity?.juicebox_config,
+      })
+    }
+    return { ready: true }
+  }
+
   #report(event, fields) {
     this.#lastDiagnostic = { event, ...fields, recorded_at: new Date().toISOString() }
     this.#diagnostic(event, fields)

@@ -7,6 +7,7 @@ import { XChatCache } from "./xchat-cache.js"
 import { XChatApi } from "./xchat-api.js"
 import { XChatSync } from "./xchat-sync.js"
 import { XChatPendingProcessor } from "./xchat-pending.js"
+import { startXChatWorkers, xchatStartupRetryDelay } from "./xchat-startup.js"
 import { createChat } from "@xdevplatform/chat-xdk"
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10)
@@ -54,8 +55,26 @@ const server = createServer(createHandler({
   webhookSecret: process.env.X_WEBHOOK_CONSUMER_SECRET,
 }))
 
+function startWorkers() {
+  void startXChatWorkers({ cache: xchatCache, pending: xchatPending, sync: xchatSync }).catch((error) => {
+    const retryDelayMs = xchatStartupRetryDelay(error)
+    console.log(JSON.stringify({
+      component: "xchat_startup",
+      event: "worker_start_failed",
+      status: Number(error?.status ?? error?.response?.status) || null,
+      retry_at: new Date(Date.now() + retryDelayMs).toISOString(),
+      error_name: typeof error?.name === "string" ? error.name : "Error",
+      error_message: String(error?.message ?? error)
+        .replace(/https?:\/\/\S+/gi, "[url]")
+        .replace(/[A-Za-z0-9_=-]{32,}/g, "[redacted]")
+        .slice(0, 300),
+    }))
+    const timer = setTimeout(startWorkers, retryDelayMs)
+    timer.unref()
+  })
+}
+
 server.listen(port, "0.0.0.0", () => {
   console.log(`Executor state handler listening on port ${port}`)
-  xchatPending.request()
-  xchatSync.resumeIncompleteJobs()
+  startWorkers()
 })

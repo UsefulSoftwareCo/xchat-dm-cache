@@ -2,6 +2,25 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { XChatDecryptor } from "../src/xchat.js"
 
+test("prepares the official SDK session without decrypting events", async () => {
+  const calls = []
+  const decryptor = new XChatDecryptor({
+    pin: "safe-pin",
+    createChat: async () => ({
+      unlock: async () => calls.push("unlock"),
+      setIdentity: () => calls.push("identity"),
+      setCacheKeys: () => calls.push("cache"),
+      decryptEvents: () => calls.push("decrypt"),
+    }),
+  })
+  assert.deepEqual(await decryptor.prepare({
+    user_id: "10",
+    public_key_version: "20",
+    juicebox_config: {},
+  }), { ready: true })
+  assert.deepEqual(calls, ["unlock", "identity", "cache"])
+})
+
 test("uses the official SDK session contract and reuses the unlocked session", async () => {
   const calls = []
   const chat = {
