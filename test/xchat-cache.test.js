@@ -83,6 +83,7 @@ test("deduplicates backfill events and encrypts private values at rest", async (
     exhausted_events: 0,
     distinct_senders: 1,
     senders_without_keys: 0,
+    missing_signing_key_user_ids: [],
     decrypted_events: 1,
     messages: 1,
     webhook_deliveries: 0,

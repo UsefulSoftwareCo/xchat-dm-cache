@@ -439,7 +439,7 @@ export class XChatCache {
   }
 
   listMissingSigningKeyUsers({ limit = 100, after } = {}) {
-    const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 100))
+    const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
     const rows = this.#db.prepare(`
       SELECT DISTINCT e.sender_id AS user_id
       FROM xchat_events e
@@ -1045,6 +1045,7 @@ export class XChatCache {
       exhausted_events: count("xchat_events", "WHERE status = 'failed' AND attempts >= 10"),
       distinct_senders: distinctSenders,
       senders_without_keys: sendersWithoutKeys,
+      missing_signing_key_user_ids: this.listMissingSigningKeyUsers({ limit: 1000 }).data.map(({ user_id: userId }) => userId),
       decrypted_events: count("xchat_decrypted_events"),
       messages: count("xchat_decrypted_events", "WHERE event_type = 'message'"),
       webhook_deliveries: count("xchat_webhook_deliveries"),
