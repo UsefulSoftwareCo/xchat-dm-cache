@@ -132,6 +132,8 @@ test("checkpoints rate limits and schedules a delayed retry", async () => {
   assert.equal(cache.getBackfillJob(job.id).last_error, "X API rate limit reached; retry scheduled")
   assert.equal(sync.diagnostics.event, "conversation_event_read_failed")
   assert.equal(sync.diagnostics.status, 429)
+  assert.match(sync.diagnostics.retry_at, /^\d{4}-\d{2}-\d{2}T/)
+  assert.equal(sync.diagnostics.rate_limit_reset_at, null)
   assert.equal(scheduled[0].delayMs, 1234)
 
   await scheduled.shift().callback()
@@ -175,6 +177,8 @@ test("retries at the reset time reported by X", async () => {
   await new Promise(setImmediate)
 
   assert.equal(scheduled[0].delayMs, 31000)
+  assert.equal(sync.diagnostics.rate_limit_reset_at, "2023-11-14T22:13:50.000Z")
+  assert.equal(sync.diagnostics.retry_at, "2023-11-14T22:13:51.000Z")
   cache.close()
 })
 

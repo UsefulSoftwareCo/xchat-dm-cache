@@ -6,14 +6,30 @@ function isRateLimitError(error) {
   return Number(error?.status ?? error?.response?.status) === 429 || /\b429\b|too many requests|rate limit/i.test(String(error?.message ?? error))
 }
 
-function rateLimitDelay(error, fallbackDelayMs, now) {
+function headerValue(error, name) {
   const headers = error?.headers ?? error?.response?.headers
-  const reset = headers?.get?.("x-rate-limit-reset")
-    ?? headers?.["x-rate-limit-reset"]
-    ?? headers?.["X-Rate-Limit-Reset"]
-  const resetAtMs = Number(reset) * 1000
+  return headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.replaceAll("-", "_")]
+}
+
+function rateLimitDelay(error, fallbackDelayMs, now) {
+  const resetAtMs = Number(headerValue(error, "x-rate-limit-reset")) * 1000
   if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return fallbackDelayMs
   return Math.max(1000, resetAtMs - now() + 1000)
+}
+
+function rateLimitDiagnostics(error, retryDelayMs, nowMs) {
+  const limitValue = headerValue(error, "x-rate-limit-limit")
+  const remainingValue = headerValue(error, "x-rate-limit-remaining")
+  const resetValue = headerValue(error, "x-rate-limit-reset")
+  const limit = limitValue == null ? Number.NaN : Number(limitValue)
+  const remaining = remainingValue == null ? Number.NaN : Number(remainingValue)
+  const resetAtMs = resetValue == null ? Number.NaN : Number(resetValue) * 1000
+  return {
+    rate_limit: Number.isFinite(limit) ? limit : null,
+    rate_limit_remaining: Number.isFinite(remaining) ? remaining : null,
+    rate_limit_reset_at: Number.isFinite(resetAtMs) && resetAtMs > 0 ? new Date(resetAtMs).toISOString() : null,
+    retry_at: new Date(nowMs + retryDelayMs).toISOString(),
+  }
 }
 
 export class XChatSync {
@@ -117,6 +133,11 @@ export class XChatSync {
     } catch (error) {
       if (isRateLimitError(error)) {
         const retryDelayMs = rateLimitDelay(error, this.#rateLimitRetryDelayMs, this.#now)
+        const nowMs = this.#now()
+        this.#report("conversation_event_read_failed", {
+          status: 429,
+          ...rateLimitDiagnostics(error, retryDelayMs, nowMs),
+        })
         const job = this.#cache.updateBackfillJob(jobId, {
           status: "pending",
           last_error: rateLimitRetryMessage,
