@@ -87,3 +87,53 @@ test("pauses before reading beyond the configured event limit", async () => {
   assert.deepEqual(requestedSizes, [1])
   cache.close()
 })
+
+test("checkpoints rate limits and schedules a delayed retry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-sync-rate-limit-"))
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: { decrypt: async () => ({ errors: [], messages: [] }) },
+  })
+  cache.configure({ identity, signing_keys: [signingKey("self")] })
+  let eventAttempts = 0
+  const api = {
+    configured: true,
+    listConversations: async () => ({ data: [{ id: "conversation-1", participant_ids: ["self"] }], next_token: null, has_more: false }),
+    getSigningKeys: async (userId) => [signingKey(userId)],
+    listConversationEvents: async () => {
+      eventAttempts += 1
+      if (eventAttempts === 1) {
+        const error = new Error("HTTP 429: Too Many Requests")
+        error.status = 429
+        throw error
+      }
+      return { events: [], key_events: [], next_token: null, has_more: false }
+    },
+  }
+  const scheduled = []
+  const sync = new XChatSync({
+    api,
+    cache,
+    rateLimitDelayMs: 1234,
+    scheduleTask: (callback, delayMs) => scheduled.push({ callback, delayMs }),
+  })
+  const job = sync.createJob({ max_events: 10, max_pages: 10 })
+
+  sync.schedule(job.id)
+  const initialRun = scheduled.shift()
+  assert.equal(initialRun.delayMs, 0)
+  await initialRun.callback()
+  await new Promise(setImmediate)
+
+  assert.equal(cache.getBackfillJob(job.id).status, "pending")
+  assert.equal(cache.getBackfillJob(job.id).last_error, "X API rate limit reached; retry scheduled")
+  assert.equal(scheduled[0].delayMs, 1234)
+
+  await scheduled.shift().callback()
+  await new Promise(setImmediate)
+
+  assert.equal(cache.getBackfillJob(job.id).status, "completed")
+  assert.equal(eventAttempts, 2)
+  cache.close()
+})

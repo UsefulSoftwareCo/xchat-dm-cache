@@ -1,13 +1,29 @@
 const maximumRequestsPerSlice = 10
+const rateLimitRetryDelayMs = 15 * 60 * 1000
+const rateLimitRetryMessage = "X API rate limit reached; retry scheduled"
+
+function isRateLimitError(error) {
+  return Number(error?.status ?? error?.response?.status) === 429 || /\b429\b|too many requests|rate limit/i.test(String(error?.message ?? error))
+}
 
 export class XChatSync {
   #api
   #cache
   #running = new Map()
+  #scheduled = new Set()
+  #scheduleTask
+  #rateLimitRetryDelayMs
 
-  constructor({ api, cache }) {
+  constructor({
+    api,
+    cache,
+    scheduleTask = (callback, delayMs) => delayMs > 0 ? setTimeout(callback, delayMs) : setImmediate(callback),
+    rateLimitDelayMs = rateLimitRetryDelayMs,
+  }) {
     this.#api = api
     this.#cache = cache
+    this.#scheduleTask = scheduleTask
+    this.#rateLimitRetryDelayMs = rateLimitDelayMs
   }
 
   get configured() {
@@ -36,12 +52,17 @@ export class XChatSync {
     }
   }
 
-  schedule(jobId) {
-    setImmediate(() => {
+  schedule(jobId, delayMs = 0) {
+    if (this.#scheduled.has(jobId)) return
+    this.#scheduled.add(jobId)
+    this.#scheduleTask(() => {
+      this.#scheduled.delete(jobId)
       this.runJob(jobId).then((job) => {
-        if (job && ["pending", "running"].includes(job.status)) this.schedule(jobId)
+        if (!job || !["pending", "running"].includes(job.status)) return
+        const nextDelayMs = job.last_error === rateLimitRetryMessage ? this.#rateLimitRetryDelayMs : 0
+        this.schedule(jobId, nextDelayMs)
       }).catch(() => {})
-    })
+    }, delayMs)
   }
 
   async #runJob(jobId, requestLimit) {
@@ -69,6 +90,14 @@ export class XChatSync {
       }
       return this.#cache.getBackfillJob(jobId)
     } catch (error) {
+      if (isRateLimitError(error)) {
+        const job = this.#cache.updateBackfillJob(jobId, {
+          status: "pending",
+          last_error: rateLimitRetryMessage,
+        })
+        this.schedule(jobId, this.#rateLimitRetryDelayMs)
+        return job
+      }
       return this.#cache.updateBackfillJob(jobId, {
         status: "failed",
         last_error: String(error?.message ?? error).slice(0, 500),
