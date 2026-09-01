@@ -30,7 +30,7 @@ function decryptor(calls) {
           event: {
             type: "message",
             id: `message-${event}`,
-            conversationId: "conversation-1",
+            conversationId: "sdk:conversation-1",
             senderId: "sender",
             sequenceId: "7",
             content: { text: "private message body" },
@@ -80,6 +80,8 @@ test("deduplicates backfill events and encrypts private values at rest", async (
   })
   const messages = cache.listMessages()
   assert.equal(messages.data[0].direction, "received")
+  assert.equal(messages.data[0].conversation_id, "conversation-1")
+  assert.equal(messages.data[0].event.conversationId, "sdk:conversation-1")
   assert.equal(messages.data[0].event.content.text, "private message body")
   cache.close()
 

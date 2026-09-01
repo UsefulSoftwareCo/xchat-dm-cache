@@ -470,7 +470,7 @@ export class XChatCache {
         `).run(
           id,
           row.event_uuid,
-          event.conversationId ?? row.conversation_id,
+          row.conversation_id,
           event.senderId ?? row.sender_id,
           createdAt,
           event.sequenceId == null ? null : String(event.sequenceId),
