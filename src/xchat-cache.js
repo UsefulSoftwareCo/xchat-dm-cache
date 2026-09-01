@@ -438,9 +438,9 @@ export class XChatCache {
     }
     const normalized = signingKeys.map(normalizeSigningKey)
     const changed = this.#transaction(() => {
-      const changedCount = this.#upsertSigningKeys(normalized, nowIso())
-      if (changedCount > 0) this.#retryFailedEvents()
-      return changedCount
+      const update = this.#upsertSigningKeys(normalized, nowIso())
+      if (update.changed > 0) this.#retryFailedEvents(update.changedUserIds)
+      return update.changed
     })
     return { signing_key_count: normalized.length, changed_signing_key_count: changed }
   }
@@ -483,20 +483,34 @@ export class XChatCache {
         identity_public_key_signature IS NOT excluded.identity_public_key_signature
     `)
     let changed = 0
+    const changedUserIds = new Set()
     for (const key of signingKeys) {
-      changed += statement.run(
+      const result = statement.run(
         key.user_id,
         key.public_key_version,
         key.public_key,
         key.signing_public_key,
         key.identity_public_key_signature,
         updatedAt,
-      ).changes
+      )
+      changed += result.changes
+      if (result.changes > 0) changedUserIds.add(key.user_id)
     }
-    return changed
+    return { changed, changedUserIds: [...changedUserIds] }
   }
 
-  #retryFailedEvents() {
+  #retryFailedEvents(userIds) {
+    if (Array.isArray(userIds)) {
+      const uniqueUserIds = [...new Set(userIds)]
+      if (uniqueUserIds.length === 0) return
+      const placeholders = uniqueUserIds.map(() => "?").join(", ")
+      this.#db.prepare(`
+        UPDATE xchat_events
+        SET status = 'pending', attempts = 0, last_error = NULL
+        WHERE status = 'failed' AND sender_id IN (${placeholders})
+      `).run(...uniqueUserIds)
+      return
+    }
     this.#db.exec(`
       UPDATE xchat_events
       SET status = 'pending', attempts = 0, last_error = NULL

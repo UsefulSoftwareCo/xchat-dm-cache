@@ -528,7 +528,7 @@ test("retains non-message XChat events", async () => {
   cache.close()
 })
 
-test("retries failed events after signing keys are updated", async () => {
+test("retries only failed events from senders whose signing keys changed", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-cache-retry-"))
   let shouldFail = true
   const cache = await XChatCache.open({
@@ -544,12 +544,20 @@ test("retries failed events after signing keys are updated", async () => {
   cache.configure({ identity, signing_keys: [signingKey] })
   cache.ingestBackfill({
     conversation: { id: "conversation-1" },
-    events: [{ event_uuid: "retry-event", encoded_event: "retry-ciphertext" }],
+    events: [{ event_uuid: "retry-event", sender_id: signingKey.user_id, encoded_event: "retry-ciphertext" }],
   })
-  assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-2" },
+    events: [{ event_uuid: "unrelated-event", sender_id: "unrelated-user", encoded_event: "unrelated-ciphertext" }],
+  })
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    assert.deepEqual(await cache.processPending(), { selected: 2, processed: 0, failed: 2 })
+  }
+  assert.equal(cache.status().exhausted_events, 2)
   shouldFail = false
   cache.addSigningKeys([{ ...signingKey, signing_public_key: "new-signing-public-key" }])
   assert.deepEqual(await cache.processPending(), { selected: 1, processed: 1, failed: 0 })
+  assert.equal(cache.status().exhausted_events, 1)
   cache.close()
 })
 
