@@ -38,6 +38,8 @@ export class XChatApi {
   #now
   #publicKeyReadQueue = Promise.resolve()
   #publicKeyReadSpacingMs
+  #signingKeyCache = new Map()
+  #signingKeyCacheTtlMs
   #sleep
   #tokenStore
   #loadedStoredToken = false
@@ -52,6 +54,7 @@ export class XChatApi {
     fetchImpl = fetch,
     tokenStore,
     publicKeyReadSpacingMs = 900,
+    signingKeyCacheTtlMs = 15 * 60 * 1000,
     now = Date.now,
     sleepImpl = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   } = {}) {
@@ -62,6 +65,7 @@ export class XChatApi {
     this.#fetch = fetchImpl
     this.#now = now
     this.#publicKeyReadSpacingMs = publicKeyReadSpacingMs
+    this.#signingKeyCacheTtlMs = signingKeyCacheTtlMs
     this.#sleep = sleepImpl
     this.#tokenStore = tokenStore
     this.#clientFactory = clientFactory
@@ -198,6 +202,8 @@ export class XChatApi {
 
   async getSigningKeys(userId) {
     if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
+    const cached = this.#signingKeyCache.get(userId)
+    if (cached && cached.expiresAt > this.#now()) return cached.keys
     const response = await this.#call(async (client) => {
       const value = await this.#pacedPublicKeyRead(
         () => client.users.getPublicKey(userId, { publicKeyFields }),
@@ -205,7 +211,9 @@ export class XChatApi {
       apiError(value, `Get XChat signing keys for ${userId}`)
       return value
     })
-    return (response.data ?? []).map((key) => mapSigningKey(userId, key))
+    const keys = (response.data ?? []).map((key) => mapSigningKey(userId, key))
+    this.#signingKeyCache.set(userId, { keys, expiresAt: this.#now() + this.#signingKeyCacheTtlMs })
+    return keys
   }
 
   async getIdentity(userId, publicKeyVersion) {

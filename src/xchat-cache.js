@@ -426,11 +426,12 @@ export class XChatCache {
       throw error
     }
     const normalized = signingKeys.map(normalizeSigningKey)
-    this.#transaction(() => {
-      this.#upsertSigningKeys(normalized, nowIso())
-      this.#retryFailedEvents()
+    const changed = this.#transaction(() => {
+      const changedCount = this.#upsertSigningKeys(normalized, nowIso())
+      if (changedCount > 0) this.#retryFailedEvents()
+      return changedCount
     })
-    return { signing_key_count: normalized.length }
+    return { signing_key_count: normalized.length, changed_signing_key_count: changed }
   }
 
   hasSigningKeys(userId) {
@@ -448,17 +449,23 @@ export class XChatCache {
         signing_public_key = excluded.signing_public_key,
         identity_public_key_signature = excluded.identity_public_key_signature,
         updated_at = excluded.updated_at
+      WHERE
+        public_key IS NOT excluded.public_key OR
+        signing_public_key IS NOT excluded.signing_public_key OR
+        identity_public_key_signature IS NOT excluded.identity_public_key_signature
     `)
+    let changed = 0
     for (const key of signingKeys) {
-      statement.run(
+      changed += statement.run(
         key.user_id,
         key.public_key_version,
         key.public_key,
         key.signing_public_key,
         key.identity_public_key_signature,
         updatedAt,
-      )
+      ).changes
     }
+    return changed
   }
 
   #retryFailedEvents() {
@@ -761,7 +768,8 @@ export class XChatCache {
       if (!this.#signingKeyProvider || !row.sender_id) throw error
       const refreshedKeys = await this.#signingKeyProvider(row.sender_id)
       if (!Array.isArray(refreshedKeys) || refreshedKeys.length === 0) throw error
-      this.addSigningKeys(refreshedKeys)
+      const update = this.addSigningKeys(refreshedKeys)
+      if (update.changed_signing_key_count === 0) throw error
       result = await decrypt()
     }
     if (hasDecryptionErrors(result)) throw new Error("Chat XDK returned decryption errors")

@@ -533,6 +533,32 @@ test("refreshes a sender signing key once before failing decryption", async () =
   cache.close()
 })
 
+test("does not reset failed events for an unchanged signing key", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-unchanged-key-"))
+  let keyCalls = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    signingKeyProvider: async () => {
+      keyCalls += 1
+      return [signingKey]
+    },
+    decryptor: {
+      decrypt: async () => ({ messages: [], errors: { "0": "bad event" } }),
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [{ event_uuid: "unchanged-key", sender_id: "sender", encoded_event: "ciphertext" }],
+  })
+
+  assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
+  assert.equal(keyCalls, 1)
+  assert.equal(cache.status().pending_events, 1)
+  cache.close()
+})
+
 test("recognizes the object-shaped error map returned by the Chat XDK", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-cache-error-map-"))
   const refreshedUsers = []

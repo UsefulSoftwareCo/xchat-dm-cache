@@ -156,3 +156,25 @@ test("paces official XChat public-key reads", async () => {
   assert.deepEqual(sleeps, [900])
   assert.deepEqual(calls, [{ userId: "one", at: 1000 }, { userId: "two", at: 1900 }])
 })
+
+test("reuses one sender signing-key read for a rate-limit window", async () => {
+  let calls = 0
+  const api = new XChatApi({
+    client: {
+      users: {
+        getPublicKey: async () => {
+          calls += 1
+          return { data: [{
+            publicKeyVersion: "1",
+            publicKey: "identity",
+            signingPublicKey: "signing",
+            identityPublicKeySignature: "signature",
+          }] }
+        },
+      },
+    },
+  })
+
+  assert.deepEqual(await api.getSigningKeys("sender"), await api.getSigningKeys("sender"))
+  assert.equal(calls, 1)
+})
