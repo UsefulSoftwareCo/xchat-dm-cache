@@ -1,35 +1,53 @@
 const defaultRetryDelayMs = 15 * 60 * 1000
 
-function retryDelay(error, fallbackDelayMs, now) {
+function headerValue(error, name) {
   const headers = error?.headers ?? error?.response?.headers
-  const reset = headers?.get?.("x-rate-limit-reset")
-    ?? headers?.["x-rate-limit-reset"]
-    ?? headers?.["X-Rate-Limit-Reset"]
+  return headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.replaceAll("-", "_")]
+}
+
+function retryDelay(error, fallbackDelayMs, now, consecutiveFailures) {
+  const retryAfterSeconds = Number(headerValue(error, "retry-after"))
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+    return Math.max(1000, (retryAfterSeconds * 1000) + 250)
+  }
+  const remaining = Number(headerValue(error, "x-rate-limit-remaining"))
+  if (Number.isFinite(remaining) && remaining > 0) {
+    return Math.min(60_000, 1000 * (2 ** Math.min(consecutiveFailures, 6)))
+  }
+  const reset = headerValue(error, "x-rate-limit-reset")
   const resetAtMs = Number(reset) * 1000
   if (!Number.isFinite(resetAtMs) || resetAtMs <= now()) return fallbackDelayMs
   return Math.max(1000, resetAtMs - now() + 1000)
 }
 
 function rateLimitDiagnostics(error) {
-  const headers = error?.headers ?? error?.response?.headers
-  const readHeader = (name) => headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.replaceAll("-", "_")]
-  const resetAtMs = Number(readHeader("x-rate-limit-reset")) * 1000
+  const resetAtMs = Number(headerValue(error, "x-rate-limit-reset")) * 1000
+  const retryAfterSeconds = Number(headerValue(error, "retry-after"))
+  const safeText = (value) => typeof value === "string"
+    ? value
+      .replace(/https?:\/\/\S+/gi, "[url]")
+      .replace(/\b\d{8,}\b/g, "[redacted]")
+      .replace(/[A-Za-z0-9_=-]{32,}/g, "[redacted]")
+      .slice(0, 300)
+    : null
   return {
-    rate_limit: Number(readHeader("x-rate-limit-limit")) || null,
-    rate_limit_remaining: Number(readHeader("x-rate-limit-remaining")) || 0,
+    rate_limit: Number(headerValue(error, "x-rate-limit-limit")) || null,
+    rate_limit_remaining: Number(headerValue(error, "x-rate-limit-remaining")) || 0,
     rate_limit_reset_at: Number.isFinite(resetAtMs) && resetAtMs > 0
       ? new Date(resetAtMs).toISOString()
       : null,
-    error_type: typeof error?.data?.type === "string"
-      ? error.data.type.slice(0, 200)
-      : typeof error?.data?.title === "string"
-        ? error.data.title.slice(0, 200)
-        : null,
+    retry_after_ms: Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+      ? retryAfterSeconds * 1000
+      : null,
+    error_type: safeText(error?.data?.type),
+    error_title: safeText(error?.data?.title),
+    error_detail: safeText(error?.data?.detail),
   }
 }
 
 export class XChatPendingProcessor {
   #cache
+  #consecutiveFailures = 0
   #lastDiagnostic = null
   #now
   #requested = false
@@ -94,6 +112,7 @@ export class XChatPendingProcessor {
     this.#running = this.#cache.processPending({ limit: 1000 })
     try {
       const result = await this.#running
+      this.#consecutiveFailures = 0
       this.#retryNotBefore = 0
       this.#report("processing_completed", {
         selected: result.selected,
@@ -101,7 +120,8 @@ export class XChatPendingProcessor {
         failed: result.failed,
       })
     } catch (error) {
-      const delayMs = retryDelay(error, this.#retryDelayMs, this.#now)
+      this.#consecutiveFailures += 1
+      const delayMs = retryDelay(error, this.#retryDelayMs, this.#now, this.#consecutiveFailures)
       this.#retryNotBefore = this.#now() + delayMs
       this.#requested = true
       this.#report("processing_failed", {

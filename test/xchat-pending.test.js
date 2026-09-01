@@ -46,7 +46,7 @@ test("coalesces requests and retries pending processing after a rate limit", asy
   assert.equal(processor.diagnostics.rate_limit, 5)
   assert.equal(processor.diagnostics.rate_limit_remaining, 0)
   assert.equal(processor.diagnostics.rate_limit_reset_at, "2023-11-14T22:28:20.000Z")
-  assert.equal(processor.diagnostics.error_type, "https://api.x.com/problems/usage-capped")
+  assert.equal(processor.diagnostics.error_type, "[url]")
 
   processor.request()
   assert.equal(scheduled.length, 1)
@@ -57,4 +57,45 @@ test("coalesces requests and retries pending processing after a rate limit", asy
   assert.equal(calls, 2)
   assert.equal(processor.diagnostics.event, "processing_completed")
   assert.equal(processor.diagnostics.processed, 2)
+})
+
+test("uses bounded short retries when X reports remaining quota", async () => {
+  let calls = 0
+  const scheduled = []
+  const processor = new XChatPendingProcessor({
+    cache: {
+      processPending: async () => {
+        calls += 1
+        if (calls === 1) {
+          const error = new Error("short throttle")
+          error.status = 429
+          error.headers = new Headers({
+            "x-rate-limit-limit": "1000",
+            "x-rate-limit-remaining": "998",
+          })
+          error.data = { title: "Too Many Requests", detail: "Please retry shortly" }
+          throw error
+        }
+        return { selected: 1, processed: 1, failed: 0 }
+      },
+    },
+    scheduleTask: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs })
+      return scheduled.length
+    },
+  })
+
+  processor.request()
+  scheduled.shift().callback()
+  await new Promise(setImmediate)
+
+  assert.equal(scheduled[0].delayMs, 2000)
+  assert.equal(processor.diagnostics.rate_limit_remaining, 998)
+  assert.equal(processor.diagnostics.error_title, "Too Many Requests")
+  assert.equal(processor.diagnostics.error_detail, "Please retry shortly")
+
+  scheduled.shift().callback()
+  await new Promise(setImmediate)
+  assert.equal(calls, 2)
+  assert.equal(processor.diagnostics.event, "processing_completed")
 })
