@@ -133,11 +133,10 @@ test("falls back to isolated retries when a decryption batch has errors", async 
     },
   })
   cache.configure({ identity, signing_keys: [signingKey] })
-  cache.ingestBackfill({
-    conversation: { id: "conversation-1" },
-    events: [
-      { event_uuid: "fallback-1", encoded_event: "fallback-ciphertext-1" },
-      { event_uuid: "fallback-2", encoded_event: "fallback-ciphertext-2" },
+  cache.acceptWebhook({
+    data: [
+      { event_type: "chat.received", event_uuid: "fallback-1", payload: { conversation_id: "conversation-1", sender_id: "sender", encoded_event: "fallback-ciphertext-1" } },
+      { event_type: "chat.received", event_uuid: "fallback-2", payload: { conversation_id: "conversation-1", sender_id: "sender", encoded_event: "fallback-ciphertext-2" } },
     ],
   })
 
@@ -147,6 +146,41 @@ test("falls back to isolated retries when a decryption batch has errors", async 
     ["fallback-ciphertext-1"],
     ["fallback-ciphertext-2"],
   ])
+  cache.close()
+})
+
+test("commits successful historical events without isolated replay", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-history-partial-"))
+  let calls = 0
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: {
+      decrypt: async (body) => {
+        calls += 1
+        return {
+          errors: { "0": "bad event" },
+          messages: [{
+            originalB64: body.events[1],
+            event: { type: "message", id: "good-message", senderId: "sender", content: { text: "good" } },
+          }],
+        }
+      },
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [
+      { event_uuid: "bad-history", encoded_event: "bad" },
+      { event_uuid: "good-history", encoded_event: "good" },
+    ],
+  })
+
+  assert.deepEqual(await cache.processPending(), { selected: 2, processed: 1, failed: 1 })
+  assert.equal(calls, 1)
+  assert.equal(cache.status().pending_events, 1)
+  assert.equal(cache.status().messages, 1)
   cache.close()
 })
 

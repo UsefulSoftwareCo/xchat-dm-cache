@@ -85,6 +85,17 @@ function hasDecryptionErrors(result) {
   return Boolean(errors && typeof errors === "object" && Object.keys(errors).length > 0)
 }
 
+function decryptionErrorIndexes(result) {
+  const errors = result?.errors
+  if (Array.isArray(errors)) {
+    return errors
+      .map((error, index) => Number(error?.index ?? error?.eventIndex ?? error?.event_index ?? index))
+      .filter(Number.isInteger)
+  }
+  if (!errors || typeof errors !== "object") return []
+  return Object.keys(errors).map(Number).filter(Number.isInteger)
+}
+
 function retryIndividually(message) {
   const error = new Error(message)
   error.retryIndividually = true
@@ -657,8 +668,9 @@ export class XChatCache {
       }
       for (const batch of batches) {
         try {
-          await this.#processEventBatch(batch)
-          processed += batch.length
+          const result = await this.#processEventBatch(batch)
+          processed += result.processed
+          failed += result.failed
         } catch (batchError) {
           if (batch.length === 1) {
             failed += 1
@@ -691,7 +703,10 @@ export class XChatCache {
   }
 
   async #processEventBatch(rows) {
-    if (rows.length === 1) return this.#processEvent(rows[0])
+    if (rows.length === 1) {
+      await this.#processEvent(rows[0])
+      return { processed: 1, failed: 0 }
+    }
     const config = this.#db.prepare("SELECT value_encrypted FROM xchat_cache_config WHERE key = 'identity'").get()
     if (!config) throw new Error("XChat cache identity is not configured")
     const signingKeys = this.#db.prepare(`
@@ -710,18 +725,33 @@ export class XChatCache {
       key_events: keyEvents,
       events: rows.map((row) => row.encoded_event),
     })
-    if (hasDecryptionErrors(result)) throw retryIndividually("Chat XDK returned decryption errors")
+    const hasErrors = hasDecryptionErrors(result)
+    const historical = rows.every((row) => row.source === "backfill")
+    if (hasErrors && !historical) throw retryIndividually("Chat XDK returned decryption errors")
     const messages = Array.isArray(result?.messages) ? result.messages : []
     if (messages.some((value) => typeof value?.originalB64 !== "string")) {
       throw retryIndividually("Chat XDK batch output cannot be matched to its source event")
     }
+    const failedIndexes = new Set()
+    if (hasErrors) {
+      const indexes = decryptionErrorIndexes(result)
+      if (indexes.length === 0) {
+        for (let index = 0; index < rows.length; index += 1) failedIndexes.add(index)
+      } else {
+        for (const index of indexes) {
+          const rowIndex = index - keyEvents.length
+          if (rowIndex >= 0 && rowIndex < rows.length) failedIndexes.add(rowIndex)
+        }
+      }
+    }
     const rowsByCiphertext = new Map(rows.map((row) => [row.encoded_event, row]))
+    const failedEventUuids = new Set([...failedIndexes].map((index) => rows[index].event_uuid))
     const insertedAt = nowIso()
     this.#transaction(() => {
       for (const value of messages) {
         const event = value?.event
         const row = rowsByCiphertext.get(value.originalB64)
-        if (!event || typeof event !== "object" || !row) continue
+        if (!event || typeof event !== "object" || !row || failedEventUuids.has(row.event_uuid)) continue
         const id = messageId(event, value.originalB64)
         const createdAt = Number.isFinite(event.createdAtMsec)
           ? new Date(event.createdAtMsec).toISOString()
@@ -748,8 +778,17 @@ export class XChatCache {
         SET status = 'processed', attempts = attempts + 1, last_error = NULL, processed_at = ?
         WHERE event_uuid = ?
       `)
-      for (const row of rows) markProcessed.run(insertedAt, row.event_uuid)
+      const markFailed = this.#db.prepare(`
+        UPDATE xchat_events
+        SET status = 'failed', attempts = attempts + 1, last_error = ?
+        WHERE event_uuid = ?
+      `)
+      for (const [index, row] of rows.entries()) {
+        if (failedIndexes.has(index)) markFailed.run("Chat XDK returned decryption errors", row.event_uuid)
+        else markProcessed.run(insertedAt, row.event_uuid)
+      }
     })
+    return { processed: rows.length - failedIndexes.size, failed: failedIndexes.size }
   }
 
   async #processEvent(row) {
