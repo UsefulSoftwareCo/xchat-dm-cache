@@ -60,7 +60,12 @@ test("deduplicates backfill events and encrypts private values at rest", async (
   const page = {
     conversation: { id: "conversation-1", type: "direct", participant_ids: ["self", "sender"] },
     key_events: ["conversation-key-event"],
-    events: [{ event_uuid: "event-1", encoded_event: "ciphertext-1", sender_id: "sender" }],
+    events: [{
+      event_uuid: "event-1",
+      conversation_id: "sdk:conversation-1",
+      encoded_event: "ciphertext-1",
+      sender_id: "sender",
+    }],
   }
 
   assert.deepEqual(cache.ingestBackfill(page), { inserted: 1, duplicates: 0, key_event_count: 1 })

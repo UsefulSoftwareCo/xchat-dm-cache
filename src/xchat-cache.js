@@ -193,6 +193,14 @@ export class XChatCache {
         event_count INTEGER NOT NULL,
         duplicate_event_count INTEGER NOT NULL
       );
+      UPDATE xchat_events
+      SET conversation_id = REPLACE(conversation_id, ':', '-')
+      WHERE conversation_id LIKE '%:%'
+        AND EXISTS (
+          SELECT 1
+          FROM xchat_conversations
+          WHERE xchat_conversations.id = REPLACE(xchat_events.conversation_id, ':', '-')
+        );
       UPDATE xchat_decrypted_events
       SET conversation_id = (
         SELECT xchat_events.conversation_id
@@ -322,7 +330,7 @@ export class XChatCache {
         const result = this.#insertEvent({
           eventUuid,
           eventType: value?.event_type ?? "chat.history",
-          conversationId: value?.conversation_id ?? conversationId,
+          conversationId,
           senderId: value?.sender_id,
           encodedEvent,
           transportId: value?.id,
