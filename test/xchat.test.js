@@ -9,7 +9,10 @@ test("uses the official SDK session contract and reuses the unlocked session", a
     setIdentity: (...args) => calls.push(["identity", ...args]),
     setCacheKeys: (enabled) => calls.push(["cache", enabled]),
     setSigningKeys: (keys) => calls.push(["signing", keys]),
-    decryptEvents: (events) => ({ messages: events.map((event) => ({ event })) }),
+    decryptEvents: (events) => {
+      calls.push(["decrypt", events])
+      return { messages: events.map((event) => ({ event })), errors: {} }
+    },
   }
   const decryptor = new XChatDecryptor({
     pin: "safe-pin",
@@ -37,6 +40,7 @@ test("uses the official SDK session contract and reuses the unlocked session", a
 
   assert.deepEqual(await decryptor.decrypt(body), {
     messages: [{ event: "key-event" }, { event: "message-event" }],
+    errors: {},
   })
   await decryptor.decrypt(body)
 
@@ -47,13 +51,60 @@ test("uses the official SDK session contract and reuses the unlocked session", a
     ["cache", true],
   ])
   assert.equal(calls.filter(([name]) => name === "create").length, 1)
-  assert.deepEqual(calls.at(-1)[1][0], {
+  assert.equal(calls.filter(([name]) => name === "signing").length, 1)
+  assert.deepEqual(calls.find(([name]) => name === "signing")[1][0], {
     userId: "10",
     publicKeyVersion: "20",
     publicKey: "signing-key",
     identityPublicKey: "identity-key",
     identityPublicKeySignature: "signature",
   })
+  assert.deepEqual(calls.filter(([name]) => name === "decrypt").map(([, events]) => events), [
+    ["key-event", "message-event"],
+    ["message-event"],
+  ])
+})
+
+test("replays changed conversation keys and reinstalls changed signing keys", async () => {
+  const calls = []
+  const chat = {
+    unlock: async () => {},
+    setIdentity: () => {},
+    setCacheKeys: () => {},
+    setSigningKeys: (keys) => calls.push(["signing", keys]),
+    decryptEvents: (events) => {
+      calls.push(["decrypt", events])
+      return { messages: [], errors: {} }
+    },
+  }
+  const decryptor = new XChatDecryptor({ pin: "safe-pin", createChat: async () => chat })
+  const body = {
+    identity: { user_id: "10", public_key_version: "20", juicebox_config: {} },
+    signing_keys: [{
+      user_id: "10",
+      public_key_version: "20",
+      public_key: "identity-key",
+      signing_public_key: "signing-key",
+      identity_public_key_signature: "signature",
+    }],
+    key_events: ["key-1"],
+    events: ["message-1"],
+  }
+
+  await decryptor.decrypt(body)
+  await decryptor.decrypt({ ...body, key_events: ["key-1", "key-2"], events: ["message-2"] })
+  await decryptor.decrypt({
+    ...body,
+    signing_keys: [{ ...body.signing_keys[0], signing_public_key: "signing-key-2" }],
+    events: ["message-3"],
+  })
+
+  assert.equal(calls.filter(([name]) => name === "signing").length, 2)
+  assert.deepEqual(calls.filter(([name]) => name === "decrypt").map(([, events]) => events), [
+    ["key-1", "message-1"],
+    ["key-1", "key-2", "message-2"],
+    ["message-3"],
+  ])
 })
 
 test("fails closed when the PIN is not configured", async () => {

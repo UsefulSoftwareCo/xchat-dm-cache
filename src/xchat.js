@@ -41,11 +41,17 @@ function mapSigningKey(value) {
   }
 }
 
+function valueFingerprint(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex")
+}
+
 export class XChatDecryptor {
   #createChat
   #pin
   #session
   #fingerprint
+  #signingKeysFingerprint
+  #hydratedKeySets = new Set()
 
   constructor({ createChat, pin }) {
     this.#createChat = createChat
@@ -89,11 +95,26 @@ export class XChatDecryptor {
       error.status = 400
       throw error
     }
-    const signingKeys = body.signing_keys.map(mapSigningKey)
+    const signingKeys = body.signing_keys.map(mapSigningKey).sort((left, right) =>
+      `${left.userId}\0${left.publicKeyVersion}`.localeCompare(`${right.userId}\0${right.publicKeyVersion}`),
+    )
 
     const session = await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
-    session.setSigningKeys(signingKeys)
-    return session.decryptEvents([...keyEvents, ...events])
+    const signingKeysFingerprint = valueFingerprint(signingKeys)
+    if (this.#signingKeysFingerprint !== signingKeysFingerprint) {
+      session.setSigningKeys(signingKeys)
+      this.#signingKeysFingerprint = signingKeysFingerprint
+    }
+
+    const keySetFingerprint = valueFingerprint(keyEvents)
+    const hydrateKeys = keyEvents.length > 0 && !this.#hydratedKeySets.has(keySetFingerprint)
+    const includedKeyEvents = hydrateKeys ? keyEvents : []
+    const result = session.decryptEvents([...includedKeyEvents, ...events])
+    const errorIndexes = Object.keys(result?.errors ?? {}).map(Number).filter(Number.isFinite)
+    if (hydrateKeys && errorIndexes.every((index) => index >= includedKeyEvents.length)) {
+      this.#hydratedKeySets.add(keySetFingerprint)
+    }
+    return result
   }
 
   #getSession({ userId, publicKeyVersion, juiceboxConfig }) {
@@ -110,6 +131,8 @@ export class XChatDecryptor {
 
     const tokens = loadRealmTokens(juiceboxConfig)
     this.#fingerprint = fingerprint
+    this.#signingKeysFingerprint = undefined
+    this.#hydratedKeySets.clear()
     this.#session = Promise.resolve(
       this.#createChat({
         juiceboxConfig: configJson,
@@ -123,6 +146,8 @@ export class XChatDecryptor {
     }).catch((error) => {
       this.#session = undefined
       this.#fingerprint = undefined
+      this.#signingKeysFingerprint = undefined
+      this.#hydratedKeySets.clear()
       throw error
     })
     return this.#session

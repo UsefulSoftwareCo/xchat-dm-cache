@@ -79,6 +79,12 @@ function messageId(event, originalB64) {
     : hash(originalB64 ?? JSON.stringify(event))
 }
 
+function hasDecryptionErrors(result) {
+  const errors = result?.errors
+  if (Array.isArray(errors)) return errors.length > 0
+  return Boolean(errors && typeof errors === "object" && Object.keys(errors).length > 0)
+}
+
 function encodeCursor(row) {
   return Buffer.from(JSON.stringify({ created_at: row.created_at, event_id: row.event_id })).toString("base64url")
 }
@@ -653,7 +659,7 @@ export class XChatCache {
     let result
     try {
       result = await decrypt()
-      if (Array.isArray(result?.errors) && result.errors.length > 0) throw new Error("XChat signing key refresh required")
+      if (hasDecryptionErrors(result)) throw new Error("XChat signing key refresh required")
     } catch (error) {
       if (!this.#signingKeyProvider || !row.sender_id) throw error
       const refreshedKeys = await this.#signingKeyProvider(row.sender_id)
@@ -661,8 +667,7 @@ export class XChatCache {
       this.addSigningKeys(refreshedKeys)
       result = await decrypt()
     }
-    const errors = Array.isArray(result?.errors) ? result.errors : []
-    if (errors.length > 0) throw new Error(`Chat XDK returned ${errors.length} decryption error(s)`)
+    if (hasDecryptionErrors(result)) throw new Error("Chat XDK returned decryption errors")
     const messages = Array.isArray(result?.messages) ? result.messages : []
     const insertedAt = nowIso()
     this.#transaction(() => {
