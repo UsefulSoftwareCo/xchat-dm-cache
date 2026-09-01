@@ -34,15 +34,35 @@ export class XChatApi {
   #clientId
   #clientSecret
   #fetch
+  #lastPublicKeyReadAt = null
+  #now
+  #publicKeyReadQueue = Promise.resolve()
+  #publicKeyReadSpacingMs
+  #sleep
   #tokenStore
   #loadedStoredToken = false
 
-  constructor({ accessToken, refreshToken, clientId, clientSecret, client, clientFactory = (token) => new Client({ accessToken: token }), fetchImpl = fetch, tokenStore } = {}) {
+  constructor({
+    accessToken,
+    refreshToken,
+    clientId,
+    clientSecret,
+    client,
+    clientFactory = (token) => new Client({ accessToken: token }),
+    fetchImpl = fetch,
+    tokenStore,
+    publicKeyReadSpacingMs = 900,
+    now = Date.now,
+    sleepImpl = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  } = {}) {
     this.#accessToken = accessToken
     this.#refreshToken = refreshToken
     this.#clientId = clientId
     this.#clientSecret = clientSecret
     this.#fetch = fetchImpl
+    this.#now = now
+    this.#publicKeyReadSpacingMs = publicKeyReadSpacingMs
+    this.#sleep = sleepImpl
     this.#tokenStore = tokenStore
     this.#clientFactory = clientFactory
     this.#client = client ?? (accessToken ? this.#clientFactory(accessToken) : null)
@@ -67,6 +87,19 @@ export class XChatApi {
       await this.#refreshAccessToken()
       return operation(this.#client)
     }
+  }
+
+  #pacedPublicKeyRead(operation) {
+    const run = this.#publicKeyReadQueue.then(async () => {
+      if (this.#lastPublicKeyReadAt !== null) {
+        const delayMs = Math.max(0, this.#lastPublicKeyReadAt + this.#publicKeyReadSpacingMs - this.#now())
+        if (delayMs > 0) await this.#sleep(delayMs)
+      }
+      this.#lastPublicKeyReadAt = this.#now()
+      return operation()
+    })
+    this.#publicKeyReadQueue = run.then(() => undefined, () => undefined)
+    return run
   }
 
   async #loadStoredToken() {
@@ -166,7 +199,9 @@ export class XChatApi {
   async getSigningKeys(userId) {
     if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
     const response = await this.#call(async (client) => {
-      const value = await client.users.getPublicKey(userId, { publicKeyFields })
+      const value = await this.#pacedPublicKeyRead(
+        () => client.users.getPublicKey(userId, { publicKeyFields }),
+      )
       apiError(value, `Get XChat signing keys for ${userId}`)
       return value
     })
@@ -176,7 +211,9 @@ export class XChatApi {
   async getIdentity(userId, publicKeyVersion) {
     if (!this.configured) throw new Error("X OAuth 2.0 user access token is not configured")
     const response = await this.#call(async (client) => {
-      const value = await client.users.getPublicKey(userId, { publicKeyFields: identityFields })
+      const value = await this.#pacedPublicKeyRead(
+        () => client.users.getPublicKey(userId, { publicKeyFields: identityFields }),
+      )
       apiError(value, `Get XChat identity for ${userId}`)
       return value
     })

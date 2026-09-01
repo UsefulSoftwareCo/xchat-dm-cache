@@ -125,3 +125,34 @@ test("refreshes the current Juicebox identity through the official public-key en
   })
   assert.equal(requestedFields.includes("juicebox_config"), true)
 })
+
+test("paces official XChat public-key reads", async () => {
+  let now = 1000
+  const sleeps = []
+  const calls = []
+  const api = new XChatApi({
+    publicKeyReadSpacingMs: 900,
+    now: () => now,
+    sleepImpl: async (delayMs) => {
+      sleeps.push(delayMs)
+      now += delayMs
+    },
+    client: {
+      users: {
+        getPublicKey: async (userId) => {
+          calls.push({ userId, at: now })
+          return { data: [{
+            publicKeyVersion: "1",
+            publicKey: "identity",
+            signingPublicKey: "signing",
+            identityPublicKeySignature: "signature",
+          }] }
+        },
+      },
+    },
+  })
+
+  await Promise.all([api.getSigningKeys("one"), api.getSigningKeys("two")])
+  assert.deepEqual(sleeps, [900])
+  assert.deepEqual(calls, [{ userId: "one", at: 1000 }, { userId: "two", at: 1900 }])
+})
