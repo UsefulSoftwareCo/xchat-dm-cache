@@ -6,10 +6,10 @@ import { XChatDecryptor } from "./xchat.js"
 import { XChatCache } from "./xchat-cache.js"
 import { XChatApi } from "./xchat-api.js"
 import { XChatSync } from "./xchat-sync.js"
+import { XChatPendingProcessor } from "./xchat-pending.js"
 import { createChat } from "@xdevplatform/chat-xdk"
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10)
-const pendingRetryIntervalMs = 15 * 60 * 1000
 const stateFile = process.env.STATE_FILE ?? "./data/state.json"
 const store = new JsonStore(stateFile)
 await store.load()
@@ -41,7 +41,8 @@ xchatApi.setTokenStore({
   set: (tokens) => xchatCache.setEncryptedConfig("x_oauth_tokens", tokens),
 })
 xchatCache.setSigningKeyProvider(xchatApi.configured ? (userId) => xchatApi.getSigningKeys(userId) : undefined)
-const xchatSync = new XChatSync({ api: xchatApi, cache: xchatCache })
+const xchatPending = new XChatPendingProcessor({ cache: xchatCache })
+const xchatSync = new XChatSync({ api: xchatApi, cache: xchatCache, pendingProcessor: xchatPending })
 
 const server = createServer(createHandler({
   store,
@@ -50,15 +51,12 @@ const server = createServer(createHandler({
   xchat,
   xchatCache,
   xchatSync,
+  xchatPending,
   webhookSecret: process.env.X_WEBHOOK_CONSUMER_SECRET,
 }))
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Executor state handler listening on port ${port}`)
-  const processPending = () => void xchatCache.processPending({ limit: 1000 }).catch((error) => {
-    console.error("XChat pending processing failed", error)
-  })
-  processPending()
-  setInterval(processPending, pendingRetryIntervalMs).unref()
+  xchatPending.request()
   xchatSync.resumeIncompleteJobs()
 })

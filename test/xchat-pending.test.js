@@ -1,0 +1,50 @@
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { XChatPendingProcessor } from "../src/xchat-pending.js"
+
+test("coalesces requests and retries pending processing after a rate limit", async () => {
+  let now = 1_700_000_000_000
+  let calls = 0
+  const scheduled = []
+  const processor = new XChatPendingProcessor({
+    cache: {
+      processPending: async () => {
+        calls += 1
+        if (calls === 1) {
+          const error = new Error("rate limited")
+          error.status = 429
+          throw error
+        }
+        return { selected: 2, processed: 2, failed: 0 }
+      },
+    },
+    now: () => now,
+    retryDelayMs: 900_000,
+    scheduleTask: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs })
+      return scheduled.length
+    },
+  })
+
+  processor.request()
+  processor.request()
+  assert.equal(scheduled.length, 1)
+  assert.equal(scheduled[0].delayMs, 0)
+
+  scheduled.shift().callback()
+  await new Promise(setImmediate)
+  assert.equal(calls, 1)
+  assert.equal(scheduled.length, 1)
+  assert.equal(scheduled[0].delayMs, 900_000)
+  assert.equal(processor.diagnostics.event, "retry_scheduled")
+
+  processor.request()
+  assert.equal(scheduled.length, 1)
+  now += 900_000
+  scheduled.shift().callback()
+  await new Promise(setImmediate)
+
+  assert.equal(calls, 2)
+  assert.equal(processor.diagnostics.event, "processing_completed")
+  assert.equal(processor.diagnostics.processed, 2)
+})

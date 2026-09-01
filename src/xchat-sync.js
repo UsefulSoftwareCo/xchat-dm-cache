@@ -20,6 +20,7 @@ export class XChatSync {
   #api
   #cache
   #lastDiagnostic = null
+  #pendingProcessor
   #running = new Map()
   #scheduled = new Set()
   #scheduleTask
@@ -29,12 +30,14 @@ export class XChatSync {
   constructor({
     api,
     cache,
+    pendingProcessor,
     scheduleTask = (callback, delayMs) => delayMs > 0 ? setTimeout(callback, delayMs) : setImmediate(callback),
     rateLimitDelayMs = rateLimitRetryDelayMs,
     now = Date.now,
   }) {
     this.#api = api
     this.#cache = cache
+    this.#pendingProcessor = pendingProcessor
     this.#scheduleTask = scheduleTask
     this.#rateLimitRetryDelayMs = rateLimitDelayMs
     this.#now = now
@@ -175,6 +178,7 @@ export class XChatSync {
       key_events: page.key_events,
       events: page.events,
     })
+    this.#pendingProcessor?.request()
     const conversationComplete = !page.has_more || !page.next_token
     this.#cache.updateBackfillConversation(job.id, conversation.conversation_id, {
       status: conversationComplete ? "completed" : "running",

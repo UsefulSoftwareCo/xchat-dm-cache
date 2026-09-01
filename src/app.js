@@ -44,7 +44,7 @@ function cacheUnavailable(response) {
   return json(response, 503, { error: "XChat cache is not available" })
 }
 
-export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache, xchatSync, webhookSecret }) {
+export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache, xchatSync, xchatPending, webhookSecret }) {
   if (!apiKey) throw new Error("STATE_API_KEY is required")
 
   return async function handler(request, response) {
@@ -79,7 +79,8 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
           return json(response, 401, { error: "Invalid webhook signature" })
         }
         const result = xchatCache.acceptWebhook(JSON.parse(rawBody.toString("utf8")), rawBody)
-        queueMicrotask(() => {
+        if (xchatPending) xchatPending.request()
+        else queueMicrotask(() => {
           xchatCache.processPending().catch((error) => console.error("XChat webhook processing failed", error))
         })
         return json(response, 200, result)
@@ -154,6 +155,7 @@ export function createHandler({ store, apiKey, publicBaseUrl, xchat, xchatCache,
           ...xchatCache.status(),
           decryption: xchat?.diagnostics ?? null,
           backfill: xchatSync?.diagnostics ?? null,
+          pending_processing: xchatPending?.diagnostics ?? null,
         })
       }
 
