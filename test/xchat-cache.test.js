@@ -95,6 +95,56 @@ test("deduplicates backfill events and encrypts private values at rest", async (
   assert.equal(bytes.includes(Buffer.from("private-token")), false)
 })
 
+test("decrypts pending events from one conversation in a batch", async () => {
+  const { cache, calls } = await cacheFixture()
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [
+      { event_uuid: "batch-1", encoded_event: "ciphertext-1" },
+      { event_uuid: "batch-2", encoded_event: "ciphertext-2" },
+    ],
+  })
+
+  assert.deepEqual(await cache.processPending(), { selected: 2, processed: 2, failed: 0 })
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].events, ["ciphertext-1", "ciphertext-2"])
+  assert.equal(cache.status().pending_events, 0)
+  assert.equal(cache.status().messages, 2)
+  cache.close()
+})
+
+test("falls back to isolated retries when a decryption batch has errors", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-batch-fallback-"))
+  const calls = []
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: {
+      decrypt: async (body) => {
+        calls.push(body.events)
+        if (body.events.length > 1) return { messages: [], errors: { "0": "bad event" } }
+        return decryptor([]).decrypt(body)
+      },
+    },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({
+    conversation: { id: "conversation-1" },
+    events: [
+      { event_uuid: "fallback-1", encoded_event: "fallback-ciphertext-1" },
+      { event_uuid: "fallback-2", encoded_event: "fallback-ciphertext-2" },
+    ],
+  })
+
+  assert.deepEqual(await cache.processPending(), { selected: 2, processed: 2, failed: 0 })
+  assert.deepEqual(calls, [
+    ["fallback-ciphertext-1", "fallback-ciphertext-2"],
+    ["fallback-ciphertext-1"],
+    ["fallback-ciphertext-2"],
+  ])
+  cache.close()
+})
+
 test("persists key events and pending ciphertext across a restart", async () => {
   const { cache, filePath } = await cacheFixture()
   cache.ingestBackfill({

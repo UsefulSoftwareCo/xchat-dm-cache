@@ -614,22 +614,106 @@ export class XChatCache {
         LIMIT ?
       `).all(boundedLimit)
       selected += rows.length
+      const batches = []
       for (const row of rows) {
+        const current = batches.at(-1)
+        if (current && current[0].conversation_id === row.conversation_id && current.length < 100) current.push(row)
+        else batches.push([row])
+      }
+      for (const batch of batches) {
         try {
-          await this.#processEvent(row)
-          processed += 1
-        } catch (error) {
-          failed += 1
-          this.#db.prepare(`
-            UPDATE xchat_events
-            SET status = 'failed', attempts = attempts + 1, last_error = ?
-            WHERE event_uuid = ?
-          `).run(String(error?.message ?? error).slice(0, 500), row.event_uuid)
+          await this.#processEventBatch(batch)
+          processed += batch.length
+        } catch (batchError) {
+          if (batch.length === 1) {
+            failed += 1
+            this.#db.prepare(`
+              UPDATE xchat_events
+              SET status = 'failed', attempts = attempts + 1, last_error = ?
+              WHERE event_uuid = ?
+            `).run(String(batchError?.message ?? batchError).slice(0, 500), batch[0].event_uuid)
+            continue
+          }
+          for (const row of batch) {
+            try {
+              await this.#processEvent(row)
+              processed += 1
+            } catch (error) {
+              failed += 1
+              this.#db.prepare(`
+                UPDATE xchat_events
+                SET status = 'failed', attempts = attempts + 1, last_error = ?
+                WHERE event_uuid = ?
+              `).run(String(error?.message ?? error).slice(0, 500), row.event_uuid)
+            }
+          }
         }
       }
       if (rows.length === boundedLimit) this.#processRequested = true
     } while (this.#processRequested)
     return { selected, processed, failed }
+  }
+
+  async #processEventBatch(rows) {
+    if (rows.length === 1) return this.#processEvent(rows[0])
+    const config = this.#db.prepare("SELECT value_encrypted FROM xchat_cache_config WHERE key = 'identity'").get()
+    if (!config) throw new Error("XChat cache identity is not configured")
+    const signingKeys = this.#db.prepare(`
+      SELECT user_id, public_key_version, public_key, signing_public_key, identity_public_key_signature
+      FROM xchat_signing_keys
+    `).all()
+    if (signingKeys.length === 0) throw new Error("XChat signing keys are not configured")
+    const keyEvents = this.#db.prepare(`
+      SELECT encoded_event FROM xchat_key_events
+      WHERE conversation_id = ?
+      ORDER BY position ASC
+    `).all(rows[0].conversation_id).map((value) => value.encoded_event)
+    const result = await this.#decryptor.decrypt({
+      identity: open(config.value_encrypted, this.#key),
+      signing_keys: signingKeys,
+      key_events: keyEvents,
+      events: rows.map((row) => row.encoded_event),
+    })
+    if (hasDecryptionErrors(result)) throw new Error("Chat XDK returned decryption errors")
+    const messages = Array.isArray(result?.messages) ? result.messages : []
+    if (messages.some((value) => typeof value?.originalB64 !== "string")) {
+      throw new Error("Chat XDK batch output cannot be matched to its source event")
+    }
+    const rowsByCiphertext = new Map(rows.map((row) => [row.encoded_event, row]))
+    const insertedAt = nowIso()
+    this.#transaction(() => {
+      for (const value of messages) {
+        const event = value?.event
+        const row = rowsByCiphertext.get(value.originalB64)
+        if (!event || typeof event !== "object" || !row) continue
+        const id = messageId(event, value.originalB64)
+        const createdAt = Number.isFinite(event.createdAtMsec)
+          ? new Date(event.createdAtMsec).toISOString()
+          : row.created_at ?? row.received_at
+        this.#db.prepare(`
+          INSERT OR IGNORE INTO xchat_decrypted_events (
+            event_id, event_uuid, conversation_id, sender_id, created_at,
+            sequence_id, event_type, event_encrypted, inserted_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          row.event_uuid,
+          row.conversation_id,
+          event.senderId ?? row.sender_id,
+          createdAt,
+          event.sequenceId == null ? null : String(event.sequenceId),
+          event.type,
+          seal(event, this.#key),
+          insertedAt,
+        )
+      }
+      const markProcessed = this.#db.prepare(`
+        UPDATE xchat_events
+        SET status = 'processed', attempts = attempts + 1, last_error = NULL, processed_at = ?
+        WHERE event_uuid = ?
+      `)
+      for (const row of rows) markProcessed.run(insertedAt, row.event_uuid)
+    })
   }
 
   async #processEvent(row) {
