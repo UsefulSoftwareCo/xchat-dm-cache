@@ -1009,12 +1009,25 @@ export class XChatCache {
 
   status() {
     const count = (table, where = "") => this.#db.prepare(`SELECT COUNT(*) AS count FROM ${table} ${where}`).get().count
+    const distinctSenders = this.#db.prepare(`
+      SELECT COUNT(DISTINCT sender_id) AS count FROM xchat_events WHERE sender_id IS NOT NULL
+    `).get().count
+    const sendersWithoutKeys = this.#db.prepare(`
+      SELECT COUNT(DISTINCT e.sender_id) AS count
+      FROM xchat_events e
+      WHERE e.sender_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM xchat_signing_keys k WHERE k.user_id = e.sender_id)
+    `).get().count
     return {
       configured: Boolean(this.#identityOrNull()),
       signing_keys: count("xchat_signing_keys"),
       conversations: count("xchat_conversations"),
       events: count("xchat_events"),
       pending_events: count("xchat_events", "WHERE status IN ('pending', 'failed')"),
+      retryable_events: count("xchat_events", "WHERE status IN ('pending', 'failed') AND attempts < 10"),
+      exhausted_events: count("xchat_events", "WHERE status = 'failed' AND attempts >= 10"),
+      distinct_senders: distinctSenders,
+      senders_without_keys: sendersWithoutKeys,
       decrypted_events: count("xchat_decrypted_events"),
       messages: count("xchat_decrypted_events", "WHERE event_type = 'message'"),
       webhook_deliveries: count("xchat_webhook_deliveries"),
