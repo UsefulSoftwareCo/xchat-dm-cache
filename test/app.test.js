@@ -36,6 +36,7 @@ before(async () => {
     xchatCache: {
       status: () => ({ messages: 0 }),
       listMessages: () => ({ data: [], meta: {} }),
+      searchMessages: () => ({ data: [], meta: { scanned_count: 1, truncated: false } }),
       acceptWebhook: (body, rawBody) => {
         acceptedWebhooks.push({ body, rawBody })
         return { accepted: true, inserted: 1, duplicates: 0 }
@@ -54,6 +55,10 @@ before(async () => {
       status: () => ({ messages: 1 }),
       acceptWebhook: () => ({ accepted: true, inserted: 0, duplicates: 0 }),
       listMessages: () => ({ data: [{ event_id: "legacy-1", created_at: "2026-01-01T00:00:00.000Z", source: "legacy_dm" }], meta: {} }),
+      searchMessages: () => ({
+        data: [{ event_id: "legacy-1", created_at: "2026-01-01T00:00:00.000Z", source: "legacy_dm", event: { text: "invest in Executor" } }],
+        meta: { scanned_count: 1, truncated: false },
+      }),
       listBackfillJobs: () => ({ data: [legacyJob] }),
       getBackfillJob: (id) => id === legacyJob.id ? legacyJob : null,
     },
@@ -123,6 +128,7 @@ test("publishes a valid OpenAPI document", async () => {
   assert.equal(document.paths["/xchat/cache/backfill-jobs"].post.operationId, "createXChatBackfillJob")
   assert.equal(document.paths["/xchat/cache/backfill-jobs/{job_id}"].patch.operationId, "raiseXChatBackfillJobLimits")
   assert.equal(document.paths["/x/cache/messages"].get.operationId, "listCachedXMessages")
+  assert.equal(document.paths["/x/cache/messages/search"].post.operationId, "searchCachedXMessages")
   assert.equal(document.paths["/x/cache/legacy/messages"].get.operationId, "listCachedLegacyDmMessages")
 })
 
@@ -219,4 +225,17 @@ test("reads unified messages and creates legacy DM backfill jobs", async () => {
   })
   assert.equal(paused.status, 200)
   assert.deepEqual(await paused.json(), pausedLegacyJob)
+})
+
+test("searches unified cached X messages", async () => {
+  const response = await fetch(`${baseUrl}/x/cache/messages/search`, {
+    method: "POST",
+    headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+    body: JSON.stringify({ query: "executor invest" }),
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), {
+    data: [{ event_id: "legacy-1", created_at: "2026-01-01T00:00:00.000Z", source: "legacy_dm", event: { text: "invest in Executor" } }],
+    meta: { result_count: 1, scanned_count: 2, truncated: false, sources: { xchat: 0, legacy_dm: 1 } },
+  })
 })

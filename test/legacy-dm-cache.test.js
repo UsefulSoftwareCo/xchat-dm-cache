@@ -31,6 +31,7 @@ test("stores legacy DM bodies encrypted and returns normalized messages", async 
   assert.equal(messages.data[0].direction, "received")
   assert.equal(messages.data[0].source, "legacy_dm")
   assert.equal(messages.data[0].event.text, "private legacy message")
+  assert.equal(cache.searchMessages({ query: "LEGACY private" }).data[0].event.text, "private legacy message")
   assert.equal(cache.status().messages, 1)
   cache.close()
 })

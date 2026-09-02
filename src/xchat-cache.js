@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { searchMessagePages } from "./message-search.js"
 
 const nowIso = () => new Date().toISOString()
 const XCHAT_WEBHOOK_EVENT_TYPES = new Set([
@@ -983,6 +984,14 @@ export class XChatCache {
 
   listMessages(options = {}) {
     return this.listEvents({ ...options, event_type: "message" })
+  }
+
+  searchMessages(options = {}) {
+    return searchMessagePages({
+      options,
+      listPage: (pageOptions) => this.listMessages(pageOptions),
+      textOf: (message) => message.event?.content?.text,
+    })
   }
 
   listConversations({ limit = 50 } = {}) {

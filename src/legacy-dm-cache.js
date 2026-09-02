@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes, randomUUID } f
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { searchMessagePages } from "./message-search.js"
 
 const nowIso = () => new Date().toISOString()
 
@@ -370,6 +371,14 @@ export class LegacyDmCache {
 
   listMessages(options = {}) {
     return this.listEvents({ ...options, event_type: "MessageCreate" })
+  }
+
+  searchMessages(options = {}) {
+    return searchMessagePages({
+      options,
+      listPage: (pageOptions) => this.listMessages(pageOptions),
+      textOf: (message) => message.event?.text,
+    })
   }
 
   createBackfillJob({ participant_ids: participantIds = [], conversation_ids: conversationIds = [], max_events: maxEvents, max_pages: maxPages }) {

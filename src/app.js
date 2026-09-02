@@ -63,6 +63,27 @@ function unifiedMessages(xchatCache, legacyDmCache, options) {
   }
 }
 
+function unifiedMessageSearch(xchatCache, legacyDmCache, options) {
+  const limit = Math.max(1, Math.min(Number(options.limit) || 50, 100))
+  const empty = { data: [], meta: { scanned_count: 0, truncated: false } }
+  const xchat = options.source === "legacy_dm" ? empty : xchatCache.searchMessages({ ...options, limit })
+  const legacy = options.source === "xchat" ? empty : legacyDmCache.searchMessages({ ...options, limit })
+  const data = [
+    ...xchat.data.map((value) => ({ ...value, source: "xchat" })),
+    ...legacy.data,
+  ].sort((left, right) => right.created_at.localeCompare(left.created_at) || right.event_id.localeCompare(left.event_id))
+    .slice(0, limit)
+  return {
+    data,
+    meta: {
+      result_count: data.length,
+      scanned_count: xchat.meta.scanned_count + legacy.meta.scanned_count,
+      truncated: xchat.meta.truncated || legacy.meta.truncated,
+      sources: { xchat: xchat.data.length, legacy_dm: legacy.data.length },
+    },
+  }
+}
+
 export function createHandler({
   store,
   apiKey,
@@ -220,6 +241,11 @@ export function createHandler({
           participant_id: url.searchParams.get("participant_id") || undefined,
           direction: url.searchParams.get("direction") || undefined,
         }))
+      }
+
+      if (url.pathname === "/x/cache/messages/search" && request.method === "POST") {
+        if (!xchatCache || !legacyDmCache) return cacheUnavailable(response)
+        return json(response, 200, unifiedMessageSearch(xchatCache, legacyDmCache, await readJson(request)))
       }
 
       if (url.pathname === "/x/cache/status" && request.method === "GET") {
@@ -421,6 +447,28 @@ export function openApiDocument(publicBaseUrl) {
             { name: "direction", in: "query", schema: { type: "string", enum: ["sent", "received"] } },
           ],
           responses: { "200": { description: "Unified cached X messages", content: { "application/json": { schema: {} } } }, "401": errorResponses["401"] },
+        },
+      },
+      "/x/cache/messages/search": {
+        post: {
+          operationId: "searchCachedXMessages",
+          summary: "Search encrypted cached XChat and legacy DM messages",
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["query"],
+            properties: {
+              query: { type: "string", minLength: 1, maxLength: 512, description: "Case-insensitive terms that must all appear in the message text" },
+              limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+              scan_limit: { type: "integer", minimum: 1, maximum: 100000, default: 20000 },
+              before: { type: "string", format: "date-time" },
+              after: { type: "string", format: "date-time" },
+              conversation_id: { type: "string" },
+              participant_id: { type: "string" },
+              direction: { type: "string", enum: ["sent", "received"] },
+              source: { type: "string", enum: ["xchat", "legacy_dm"] },
+            },
+          } } } },
+          responses: { "200": { description: "Matching cached X messages", content: { "application/json": { schema: {} } } }, "400": { description: "Invalid search query" }, "401": errorResponses["401"] },
         },
       },
       "/x/cache/status": {
