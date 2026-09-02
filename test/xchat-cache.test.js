@@ -117,6 +117,8 @@ test("deduplicates backfill events and encrypts private values at rest", async (
   assert.equal(messages.data[0].event.conversationId, "sdk:conversation-1")
   assert.equal(messages.data[0].event.content.text, "private message body")
   assert.equal(cache.searchMessages({ query: "PRIVATE body" }).data[0].event.content.text, "private message body")
+  assert.equal(cache.searchMessages({ query: "private", participant_id: "sender" }).data.length, 1)
+  assert.equal(cache.searchMessages({ query: "private", participant_id: "other" }).data.length, 0)
   cache.close()
 
   const bytes = await readFile(filePath)

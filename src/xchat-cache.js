@@ -921,7 +921,7 @@ export class XChatCache {
     })
   }
 
-  listEvents({ limit = 50, before, after, conversation_id: conversationId, direction, event_type: eventType } = {}) {
+  listEvents({ limit = 50, before, after, conversation_id: conversationId, participant_id: participantId, direction, event_type: eventType } = {}) {
     const boundedLimit = Math.max(1, Math.min(Number(limit) || 50, 100))
     const identity = this.#identityOrNull()
     const clauses = []
@@ -949,6 +949,10 @@ export class XChatCache {
     if (conversationId) {
       clauses.push("conversation_id = ?")
       parameters.push(conversationId)
+    }
+    if (participantId) {
+      clauses.push("conversation_id IN (SELECT id FROM xchat_conversations WHERE participant_ids_json LIKE ?)")
+      parameters.push(`%\"${participantId}\"%`)
     }
     if (direction === "sent" && identity) {
       clauses.push("sender_id = ?")

@@ -79,7 +79,10 @@ function unifiedMessageSearch(xchatCache, legacyDmCache, options) {
       result_count: data.length,
       scanned_count: xchat.meta.scanned_count + legacy.meta.scanned_count,
       truncated: xchat.meta.truncated || legacy.meta.truncated,
-      sources: { xchat: xchat.data.length, legacy_dm: legacy.data.length },
+      sources: {
+        xchat: data.filter((message) => message.source === "xchat").length,
+        legacy_dm: data.filter((message) => message.source === "legacy_dm").length,
+      },
     },
   }
 }
