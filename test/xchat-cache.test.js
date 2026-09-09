@@ -162,6 +162,53 @@ test("services queued I/O while draining a multi-conversation backlog", async ()
   cache.close()
 })
 
+for (const eventCount of [1, 2]) {
+  test(`stores ${eventCount} verified replies despite an unrelated historical key error`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "xchat-cache-key-errors-"))
+    const cache = await XChatCache.open({
+      filePath: join(directory, "cache.sqlite"),
+      encryptionSecret: "test-state-api-key",
+      decryptor: {
+        decrypt: async (body) => ({
+          errors: { "0": "Historical key signature verification failed" },
+          messages: [
+            { originalB64: "old-key", event: { type: "key_change", id: "old-key" } },
+            ...(await decryptor([]).decrypt(body)).messages,
+          ],
+        }),
+      },
+    })
+    cache.configure({ identity, signing_keys: [signingKey] })
+    cache.acceptWebhook({ data: Array.from({ length: eventCount }, (_, index) => ({
+      event_type: "chat.received", event_uuid: `verified-${index}`,
+      payload: { conversation_id: "conversation-1", sender_id: "sender", encoded_event: `verified-ciphertext-${index}` },
+    })) })
+    assert.deepEqual(await cache.processPending(), { selected: eventCount, processed: eventCount, failed: 0 })
+    assert.equal(cache.status().messages, eventCount)
+    assert.equal(cache.status().decrypted_events, eventCount)
+    cache.close()
+  })
+}
+
+test("does not treat a verified key change as a verified reply", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xchat-cache-invalid-reply-"))
+  const cache = await XChatCache.open({
+    filePath: join(directory, "cache.sqlite"),
+    encryptionSecret: "test-state-api-key",
+    decryptor: { decrypt: async () => ({
+      errors: { "1": "Message signature verification failed" },
+      messages: [{ originalB64: "old-key", event: { type: "key_change", id: "old-key" } }],
+    }) },
+  })
+  cache.configure({ identity, signing_keys: [signingKey] })
+  cache.ingestBackfill({ conversation: { id: "conversation-1" }, events: [
+    { event_uuid: "invalid-reply", sender_id: "sender", encoded_event: "invalid-ciphertext" },
+  ] })
+  assert.deepEqual(await cache.processPending(), { selected: 1, processed: 0, failed: 1 })
+  assert.equal(cache.status().decrypted_events, 0)
+  cache.close()
+})
+
 test("falls back to isolated retries when a decryption batch has errors", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-cache-batch-fallback-"))
   const calls = []
