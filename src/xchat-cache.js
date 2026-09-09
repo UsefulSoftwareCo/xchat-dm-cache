@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { setImmediate as yieldToIo } from "node:timers/promises"
 import { searchMessagePages } from "./message-search.js"
 
 const nowIso = () => new Date().toISOString()
@@ -86,15 +87,16 @@ function hasDecryptionErrors(result) {
   return Boolean(errors && typeof errors === "object" && Object.keys(errors).length > 0)
 }
 
-function decryptionErrorIndexes(result) {
-  const errors = result?.errors
-  if (Array.isArray(errors)) {
-    return errors
-      .map((error, index) => Number(error?.index ?? error?.eventIndex ?? error?.event_index ?? index))
-      .filter(Number.isInteger)
-  }
-  if (!errors || typeof errors !== "object") return []
-  return Object.keys(errors).map(Number).filter(Number.isInteger)
+function verifiedCiphertexts(result) {
+  return new Set((result?.messages ?? [])
+    .filter((value) => value?.event && typeof value.event === "object" && typeof value.originalB64 === "string")
+    .map((value) => value.originalB64))
+}
+
+function sourceDecryptionFailed(result, ciphertexts) {
+  if (!hasDecryptionErrors(result)) return false
+  const verified = verifiedCiphertexts(result)
+  return ciphertexts.some((ciphertext) => !verified.has(ciphertext))
 }
 
 function retryIndividually(message) {
@@ -713,13 +715,21 @@ export class XChatCache {
         LIMIT ?
       `).all(boundedLimit)
       selected += rows.length
-      const batches = []
+      const conversations = new Map()
       for (const row of rows) {
-        const current = batches.at(-1)
-        if (current && current[0].conversation_id === row.conversation_id && current.length < 100) current.push(row)
-        else batches.push([row])
+        if (!conversations.has(row.conversation_id)) conversations.set(row.conversation_id, [])
+        conversations.get(row.conversation_id).push(row)
+      }
+      const batches = []
+      for (const conversation of conversations.values()) {
+        for (let offset = 0; offset < conversation.length; offset += 100) {
+          batches.push(conversation.slice(offset, offset + 100))
+        }
       }
       for (const batch of batches) {
+        // WASM decryption is synchronous. Yield between batches so backlog
+        // recovery does not starve webhook ingestion and cache reads.
+        await yieldToIo()
         try {
           const result = await this.#processEventBatch(batch)
           processed += result.processed
@@ -736,6 +746,7 @@ export class XChatCache {
           }
           if (!batchError?.retryIndividually) throw batchError
           for (const row of batch) {
+            await yieldToIo()
             try {
               await this.#processEvent(row)
               processed += 1
@@ -780,21 +791,21 @@ export class XChatCache {
     })
     const hasErrors = hasDecryptionErrors(result)
     const historical = rows.every((row) => row.source === "backfill")
-    if (hasErrors && !historical) throw retryIndividually("Chat XDK returned decryption errors")
+    if (!historical && sourceDecryptionFailed(result, rows.map((row) => row.encoded_event))) {
+      throw retryIndividually("Chat XDK returned decryption errors")
+    }
     const messages = Array.isArray(result?.messages) ? result.messages : []
     if (messages.some((value) => typeof value?.originalB64 !== "string")) {
       throw retryIndividually("Chat XDK batch output cannot be matched to its source event")
     }
     const failedIndexes = new Set()
     if (hasErrors) {
-      const indexes = decryptionErrorIndexes(result)
-      if (indexes.length === 0) {
-        for (let index = 0; index < rows.length; index += 1) failedIndexes.add(index)
-      } else {
-        for (const index of indexes) {
-          const rowIndex = index - keyEvents.length
-          if (rowIndex >= 0 && rowIndex < rows.length) failedIndexes.add(rowIndex)
-        }
+      // Errors also include historical key changes. Match successful source
+      // events by ciphertext rather than rejecting a whole batch because an
+      // unrelated key change failed verification.
+      const verified = verifiedCiphertexts(result)
+      for (const [index, row] of rows.entries()) {
+        if (!verified.has(row.encoded_event)) failedIndexes.add(index)
       }
     }
     const rowsByCiphertext = new Map(rows.map((row) => [row.encoded_event, row]))
@@ -871,7 +882,7 @@ export class XChatCache {
     let result
     try {
       result = await decrypt()
-      if (hasDecryptionErrors(result)) throw new Error("XChat signing key refresh required")
+      if (sourceDecryptionFailed(result, [row.encoded_event])) throw new Error("XChat signing key refresh required")
     } catch (error) {
       if (
         !this.#signingKeyProvider
@@ -885,13 +896,18 @@ export class XChatCache {
       if (update.changed_signing_key_count === 0) throw error
       result = await decrypt()
     }
-    if (hasDecryptionErrors(result)) throw new Error("Chat XDK returned decryption errors")
+    if (sourceDecryptionFailed(result, [row.encoded_event])) throw new Error("Chat XDK returned decryption errors")
     const messages = Array.isArray(result?.messages) ? result.messages : []
     const insertedAt = nowIso()
     this.#transaction(() => {
       for (const value of messages) {
         const event = value?.event
         if (!event || typeof event !== "object") continue
+        if (typeof value.originalB64 === "string") {
+          if (value.originalB64 !== row.encoded_event) continue
+        } else if (keyEvents.length > 0 || hasDecryptionErrors(result) || messages.length !== 1) {
+          throw new Error("Chat XDK output cannot be matched to its source event")
+        }
         const id = messageId(event, value.originalB64)
         const createdAt = Number.isFinite(event.createdAtMsec)
           ? new Date(event.createdAtMsec).toISOString()

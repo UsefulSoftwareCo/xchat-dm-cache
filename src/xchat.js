@@ -64,7 +64,6 @@ export class XChatDecryptor {
   #session
   #fingerprint
   #signingKeysFingerprint
-  #hydratedKeySets = new Set()
 
   constructor({ createChat, pin, diagnostic = () => {}, refreshIdentity }) {
     this.#createChat = createChat
@@ -98,7 +97,7 @@ export class XChatDecryptor {
     try {
       await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
     } catch (error) {
-      if (!this.#refreshIdentity || !/InvalidAuth/i.test(String(error?.message ?? error))) throw error
+      if (!this.#refreshIdentity || !needsIdentityRefresh(error)) throw error
       this.#report("identity_refresh_started", {})
       let refreshedIdentity
       try {
@@ -163,7 +162,7 @@ export class XChatDecryptor {
     try {
       session = await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
     } catch (error) {
-      if (!this.#refreshIdentity || !/InvalidAuth/i.test(String(error?.message ?? error))) throw error
+      if (!this.#refreshIdentity || !needsIdentityRefresh(error)) throw error
       this.#report("identity_refresh_started", {})
       let refreshedIdentity
       try {
@@ -188,9 +187,9 @@ export class XChatDecryptor {
       this.#signingKeysFingerprint = signingKeysFingerprint
     }
 
-    const keySetFingerprint = valueFingerprint(keyEvents)
-    const hydrateKeys = keyEvents.length > 0 && !this.#hydratedKeySets.has(keySetFingerprint)
-    const includedKeyEvents = hydrateKeys ? keyEvents : []
+    // Chat XDK retains only the highest conversation-key version. Historical
+    // replies can require earlier versions, so every batch needs its key events.
+    const includedKeyEvents = keyEvents
     const startedAt = Date.now()
     this.#report("decrypt_started", {
       key_event_count: includedKeyEvents.length,
@@ -215,10 +214,6 @@ export class XChatDecryptor {
       error_count: Object.keys(result?.errors ?? {}).length,
       message_count: Array.isArray(result?.messages) ? result.messages.length : 0,
     })
-    const errorIndexes = Object.keys(result?.errors ?? {}).map(Number).filter(Number.isFinite)
-    if (hydrateKeys && errorIndexes.every((index) => index >= includedKeyEvents.length)) {
-      this.#hydratedKeySets.add(keySetFingerprint)
-    }
     return result
   }
 
@@ -237,10 +232,9 @@ export class XChatDecryptor {
     const tokens = loadRealmTokens(juiceboxConfig)
     this.#fingerprint = fingerprint
     this.#signingKeysFingerprint = undefined
-    this.#hydratedKeySets.clear()
     const unlockStartedAt = Date.now()
     this.#report("session_unlock_started", {})
-    this.#session = Promise.resolve(
+    this.#session = Promise.resolve().then(() =>
       this.#createChat({
         juiceboxConfig: configJson,
         getAuthToken: async (realmId) => tokens.get(String(realmId).toLowerCase()) ?? "",
@@ -259,9 +253,12 @@ export class XChatDecryptor {
       this.#session = undefined
       this.#fingerprint = undefined
       this.#signingKeysFingerprint = undefined
-      this.#hydratedKeySets.clear()
       throw error
     })
     return this.#session
   }
+}
+
+function needsIdentityRefresh(error) {
+  return error?.code === "INVALID_XCHAT_CONFIG" || /InvalidAuth/i.test(String(error?.message ?? error))
 }
