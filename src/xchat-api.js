@@ -1,4 +1,5 @@
 import { Client } from "@xdevplatform/xdk"
+import { juiceboxConfigFromXdk } from "./xchat-config.js"
 
 const publicKeyFields = [
   "public_key_version",
@@ -266,7 +267,7 @@ export class XChatApi {
       identity: {
         user_id: userId,
         public_key_version: String(key.publicKeyVersion),
-        juicebox_config: key.juiceboxConfig,
+        juicebox_config: juiceboxConfigFromXdk(key.juiceboxConfig),
       },
       signing_keys: keys.map((value) => mapSigningKey(userId, value)),
     }

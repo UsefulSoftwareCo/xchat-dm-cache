@@ -98,7 +98,7 @@ export class XChatDecryptor {
     try {
       await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
     } catch (error) {
-      if (!this.#refreshIdentity || !/InvalidAuth/i.test(String(error?.message ?? error))) throw error
+      if (!this.#refreshIdentity || !needsIdentityRefresh(error)) throw error
       this.#report("identity_refresh_started", {})
       let refreshedIdentity
       try {
@@ -163,7 +163,7 @@ export class XChatDecryptor {
     try {
       session = await this.#getSession({ userId, publicKeyVersion, juiceboxConfig })
     } catch (error) {
-      if (!this.#refreshIdentity || !/InvalidAuth/i.test(String(error?.message ?? error))) throw error
+      if (!this.#refreshIdentity || !needsIdentityRefresh(error)) throw error
       this.#report("identity_refresh_started", {})
       let refreshedIdentity
       try {
@@ -240,7 +240,7 @@ export class XChatDecryptor {
     this.#hydratedKeySets.clear()
     const unlockStartedAt = Date.now()
     this.#report("session_unlock_started", {})
-    this.#session = Promise.resolve(
+    this.#session = Promise.resolve().then(() =>
       this.#createChat({
         juiceboxConfig: configJson,
         getAuthToken: async (realmId) => tokens.get(String(realmId).toLowerCase()) ?? "",
@@ -264,4 +264,8 @@ export class XChatDecryptor {
     })
     return this.#session
   }
+}
+
+function needsIdentityRefresh(error) {
+  return error?.code === "INVALID_XCHAT_CONFIG" || /InvalidAuth/i.test(String(error?.message ?? error))
 }

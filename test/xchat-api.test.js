@@ -124,6 +124,13 @@ test("refreshes an expired OAuth token and persists the rotated token", async ()
 
 test("refreshes the current Juicebox identity through the official public-key endpoint", async () => {
   let requestedFields
+  const realmConfig = JSON.stringify({
+    realms: [{ id: "realm-1", address: "https://realm.example.test", public_key: "public-key" }],
+    register_threshold: 1,
+    recover_threshold: 1,
+    pin_hashing_mode: "Standard2019",
+  })
+  const tokenMap = [{ key: "realm-1", value: { address: "https://realm.example.test", token: "test-token" } }]
   const api = new XChatApi({
     client: {
       users: {
@@ -135,7 +142,7 @@ test("refreshes the current Juicebox identity through the official public-key en
               publicKey: "identity",
               signingPublicKey: "signing",
               identityPublicKeySignature: "signature",
-              juiceboxConfig: { token_map: [] },
+              juiceboxConfig: { keyStoreTokenMapJson: realmConfig, maxGuessCount: 20, tokenMap },
             }],
           }
         },
@@ -147,7 +154,7 @@ test("refreshes the current Juicebox identity through the official public-key en
     identity: {
       user_id: "self",
       public_key_version: "7",
-      juicebox_config: { token_map: [] },
+      juicebox_config: { key_store_token_map_json: realmConfig, max_guess_count: 20, token_map: tokenMap },
     },
     signing_keys: [{
       user_id: "self",

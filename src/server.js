@@ -11,6 +11,7 @@ import { startXChatWorkers, xchatStartupRetryDelay } from "./xchat-startup.js"
 import { LegacyDmCache } from "./legacy-dm-cache.js"
 import { LegacyDmSync } from "./legacy-dm-sync.js"
 import { createChat } from "@xdevplatform/chat-xdk"
+import { validateJuiceboxConfig } from "./xchat-config.js"
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10)
 const stateFile = process.env.STATE_FILE ?? "./data/state.json"
@@ -24,7 +25,10 @@ const xchatApi = new XChatApi({
 })
 let xchatCache
 const xchat = new XChatDecryptor({
-  createChat,
+  createChat: (options) => {
+    validateJuiceboxConfig(JSON.parse(options.juiceboxConfig))
+    return createChat(options)
+  },
   pin: process.env.XCHAT_PIN,
   diagnostic: (event, fields) => console.log(JSON.stringify({ component: "xchat_decryptor", event, ...fields })),
   refreshIdentity: async ({ userId, publicKeyVersion }) => {
