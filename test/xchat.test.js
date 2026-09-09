@@ -80,7 +80,7 @@ test("uses the official SDK session contract and reuses the unlocked session", a
   })
   assert.deepEqual(calls.filter(([name]) => name === "decrypt").map(([, events]) => events), [
     ["key-event", "message-event"],
-    ["message-event"],
+    ["key-event", "message-event"],
   ])
 })
 
@@ -122,8 +122,30 @@ test("replays changed conversation keys and reinstalls changed signing keys", as
   assert.deepEqual(calls.filter(([name]) => name === "decrypt").map(([, events]) => events), [
     ["key-1", "message-1"],
     ["key-1", "key-2", "message-2"],
-    ["message-3"],
+    ["key-1", "message-3"],
   ])
+})
+
+test("supplies historical keys on later batches when the SDK only caches the newest version", async () => {
+  const decryptor = new XChatDecryptor({
+    pin: "test-pin",
+    createChat: async () => ({
+      unlock: async () => {}, setIdentity() {}, setCacheKeys() {}, setSigningKeys() {},
+      decryptEvents: (events) => events.includes("old-key-version")
+        ? { messages: [{ originalB64: events.at(-1), event: { type: "message" } }], errors: {} }
+        : { messages: [], errors: { "0": "Historical key version is not in the SDK cache" } },
+    }),
+  })
+  const body = {
+    identity: { user_id: "self", public_key_version: "1", juicebox_config: {} },
+    signing_keys: [{ user_id: "sender", public_key_version: "1", public_key: "identity", signing_public_key: "signing", identity_public_key_signature: "signature" }],
+    key_events: ["old-key-version", "new-key-version"],
+    events: ["old-reply-1"],
+  }
+  await decryptor.decrypt(body)
+  const result = await decryptor.decrypt({ ...body, events: ["old-reply-2"] })
+  assert.deepEqual(result.errors, {})
+  assert.equal(result.messages[0].originalB64, "old-reply-2")
 })
 
 test("fails closed when the PIN is not configured", async () => {

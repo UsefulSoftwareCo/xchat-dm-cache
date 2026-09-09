@@ -715,11 +715,16 @@ export class XChatCache {
         LIMIT ?
       `).all(boundedLimit)
       selected += rows.length
-      const batches = []
+      const conversations = new Map()
       for (const row of rows) {
-        const current = batches.at(-1)
-        if (current && current[0].conversation_id === row.conversation_id && current.length < 100) current.push(row)
-        else batches.push([row])
+        if (!conversations.has(row.conversation_id)) conversations.set(row.conversation_id, [])
+        conversations.get(row.conversation_id).push(row)
+      }
+      const batches = []
+      for (const conversation of conversations.values()) {
+        for (let offset = 0; offset < conversation.length; offset += 100) {
+          batches.push(conversation.slice(offset, offset + 100))
+        }
       }
       for (const batch of batches) {
         // WASM decryption is synchronous. Yield between batches so backlog
@@ -796,8 +801,8 @@ export class XChatCache {
     const failedIndexes = new Set()
     if (hasErrors) {
       // Errors also include historical key changes. Match successful source
-      // events by ciphertext; key hydration can be skipped by the SDK session,
-      // so subtracting the stored key count from error indexes is not reliable.
+      // events by ciphertext rather than rejecting a whole batch because an
+      // unrelated key change failed verification.
       const verified = verifiedCiphertexts(result)
       for (const [index, row] of rows.entries()) {
         if (!verified.has(row.encoded_event)) failedIndexes.add(index)

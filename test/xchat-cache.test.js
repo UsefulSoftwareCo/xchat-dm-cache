@@ -162,6 +162,19 @@ test("services queued I/O while draining a multi-conversation backlog", async ()
   cache.close()
 })
 
+test("batches interleaved conversations while preserving each conversation's event order", async () => {
+  const { cache, calls } = await cacheFixture()
+  for (const [conversation, event] of [["a", "a1"], ["b", "b1"], ["a", "a2"]]) {
+    cache.ingestBackfill({
+      conversation: { id: conversation },
+      events: [{ event_uuid: event, encoded_event: event }],
+    })
+  }
+  assert.equal((await cache.processPending()).processed, 3)
+  assert.deepEqual(calls.map((call) => call.events), [["a1", "a2"], ["b1"]])
+  cache.close()
+})
+
 for (const eventCount of [1, 2]) {
   test(`stores ${eventCount} verified replies despite an unrelated historical key error`, async () => {
     const directory = await mkdtemp(join(tmpdir(), "xchat-cache-key-errors-"))
