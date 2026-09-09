@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { setImmediate as yieldToIo } from "node:timers/promises"
 import { searchMessagePages } from "./message-search.js"
 
 const nowIso = () => new Date().toISOString()
@@ -720,6 +721,9 @@ export class XChatCache {
         else batches.push([row])
       }
       for (const batch of batches) {
+        // WASM decryption is synchronous. Yield between batches so backlog
+        // recovery does not starve webhook ingestion and cache reads.
+        await yieldToIo()
         try {
           const result = await this.#processEventBatch(batch)
           processed += result.processed
@@ -736,6 +740,7 @@ export class XChatCache {
           }
           if (!batchError?.retryIndividually) throw batchError
           for (const row of batch) {
+            await yieldToIo()
             try {
               await this.#processEvent(row)
               processed += 1

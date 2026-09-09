@@ -144,6 +144,24 @@ test("decrypts pending events from one conversation in a batch", async () => {
   cache.close()
 })
 
+test("services queued I/O while draining a multi-conversation backlog", async () => {
+  const { cache } = await cacheFixture()
+  for (let index = 0; index < 3; index += 1) {
+    cache.ingestBackfill({
+      conversation: { id: `conversation-${index}` },
+      events: [{ event_uuid: `responsive-${index}`, encoded_event: `ciphertext-${index}` }],
+    })
+  }
+  const processing = cache.processPending()
+  const first = await Promise.race([
+    processing.then(() => "backlog-complete"),
+    new Promise((resolve) => setImmediate(() => resolve("io-serviced"))),
+  ])
+  assert.equal(first, "io-serviced")
+  assert.equal((await processing).processed, 3)
+  cache.close()
+})
+
 test("falls back to isolated retries when a decryption batch has errors", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xchat-cache-batch-fallback-"))
   const calls = []
